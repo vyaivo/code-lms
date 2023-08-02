@@ -26,6 +26,7 @@ from transformers import GPT2Tokenizer, GPT2TokenizerFast
 import numpy as np
 from typing import List, Union
 from .gpt2_tokenization import GPT2Tokenizer
+from .tokompiler.tokenizer import Tokompiler
 
 
 def build_tokenizer(args):
@@ -47,6 +48,8 @@ def build_tokenizer(args):
         tokenizer = HFGPT2Tokenizer(args.vocab_file)
     elif args.tokenizer_type.lower() == "CharLevelTokenizer".lower():
         tokenizer = CharLevelTokenizer(vocab_size=512)
+    elif args.tokenizer_type.lower() == "Tokompiler".lower():
+        tokenizer = TokompilerTokenizer(vocab_path=args.vocab_file)
     else:
         raise NotImplementedError('{} tokenizer is not '
                                   'implemented.'.format(args.tokenizer_type))
@@ -292,3 +295,50 @@ class CharLevelTokenizer(AbstractTokenizer):
     @property
     def eod(self):
         return self.eod_id
+
+
+class TokompilerTokenizer(AbstractTokenizer):
+    def __init__(self, vocab_path):
+        name = 'Tokompiler'
+        super().__init__(name)
+        self.tokenizer = Tokompiler(vocab_path)
+
+    @property
+    def vocab_size(self):
+        return len(self.tokenizer.encoder)
+
+    @property
+    def vocab(self):
+        """Dictionary from vocab text token to id token."""
+        return self.tokenizer.encoder
+
+    @property
+    def inv_vocab(self):
+        """Dictionary from vocab id token to text token."""
+        return self.tokenizer.decoder
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.decode(token_ids)
+
+    @property
+    def cls(self):
+        return self.tokenizer.encoder['[CLS]']
+
+    @property
+    def sep(self):
+        return self.tokenizer.encoder['[SEP]']
+
+    @property
+    def pad(self):
+        return self.tokenizer.encoder['[PAD]']
+
+    @property
+    def eod(self):
+        return self.tokenizer.encoder['[EOS]']
+
+    @property
+    def mask(self):
+        return self.tokenizer.encoder['[MSK]']

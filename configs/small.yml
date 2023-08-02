@@ -43,7 +43,6 @@
    # batch / data settings
    "train_micro_batch_size_per_gpu": 4,
    "data-impl": "mmap",
-   "split": "949,50,1",
 
    # activation checkpointing
    "checkpoint-activations": true,
@@ -58,7 +57,7 @@
    "attention-dropout": 0.0,
 
    # precision settings
-   "fp16": { 
+   "fp16": {
      "enabled": true,
      "loss_scale": 0,
      "loss_scale_window": 1000,
@@ -67,13 +66,13 @@
    },
 
    # misc. training settings
-   "train-iters": 320000,
-   "lr-decay-iters": 320000,
+   "train-iters": 60000,
+   "lr-decay-iters": 60000,
    "distributed-backend": "nccl",
    "lr-decay-style": "cosine",
    "warmup": 0.01,
    "save-interval": 10000,
-   "eval-interval": 1000,
+   "eval-interval": 100,
    "eval-iters": 10,
 
    # logging

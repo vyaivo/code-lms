@@ -1,0 +1,17 @@
+# Suggested data paths when using GPT-NeoX locally
+{
+        #  "data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/gpt2tok/allc_code_document",
+  "data-path": "HPCorpus_final/pre_train/fortran/gpt2tok/fortran_code_document",
+
+  "vocab-file": "data/gpt2-vocab.json",
+  "merge-file": "data/gpt2-merges.txt",
+
+  #"save": "checkpoints/fortran_gpt2tok_160M_20K",
+  "load": "checkpoints/fortran_gpt2tok_160M",
+  #  "finetune": True,
+  "checkpoint_validation_with_forward_pass": False,
+
+  "tensorboard-dir": "tensorboard",
+  "log-dir": "logs",
+  "use_wandb": False,
+}

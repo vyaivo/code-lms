@@ -1,7 +1,7 @@
 from tools.corpora import prepare_dataset
 import argparse
 
-TOKENIZER_CHOICES = ['HFGPT2Tokenizer', 'HFTokenizer', 'GPT2BPETokenizer', 'CharLevelTokenizer']
+TOKENIZER_CHOICES = ['HFGPT2Tokenizer', 'HFTokenizer', 'GPT2BPETokenizer', 'CharLevelTokenizer', 'Tokompiler']
 
 
 def get_args():

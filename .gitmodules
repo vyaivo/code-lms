@@ -1,0 +1,3 @@
+[submodule "polycoder/megatron/tokenizer/tokompiler"]
+	path = polycoder/megatron/tokenizer/tokompiler
+	url = https://github.com/Scientific-Computing-Lab-NRCN/Tokompiler.git

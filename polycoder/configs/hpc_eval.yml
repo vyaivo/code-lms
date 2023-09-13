@@ -1,0 +1,31 @@
+{
+  # GPT-style tokenization (BPE)
+        #  "data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/gpt2tok/allc_code_document",
+        #"data-path": "HPCorpus_final/pre_train/fortran/gpt2tok/fortran_code_document",
+        #"data-path": "HPCorpus_final/fine_tune/fortran/gpt2tok/fortran_code_document",
+        #  "data-path": "HPCorpus_final/fine_tune/c-cpp-polycoder/gpt2tok/allc_code_document",
+        #  "vocab-file": "data/gpt2-vocab.json",
+        #  "merge-file": "data/gpt2-merges.txt",
+  
+  # Tokompiler
+  #"data-path": "HPCorpus_final/fine_tune/c-cpp-polycoder/tokompiler/allc_code_document",
+  "data-path": "HPCorpus_final/fine_tune/fortran/tokompiler/fortran_code_document",
+  "tokenizer-type": "Tokompiler",
+  "vocab-file": "megatron/tokenizer/tokompiler/tokenizer_vocab/vocab.txt",
+
+  "do_train": 0,
+  "do_valid": 0,
+  "do_test": 1,
+  "split": "0,0,100",
+  "load": "checkpoints/fortran_tokompiler/hp5_15M_lr25e-5/", #_lr25e-5",
+  #"load": "checkpoints/fortran_gpt2tok_160M/hyperparams1/", #_lr25e-5",
+  #"load": "checkpoints/allc_gpt2tok_2-7B", #_lr25e-5",
+  #"load": "checkpoints/finetune_allc_gpt2tok_2-7B", #_lr25e-5",
+  #"load": "checkpoints/allc_tokompiler_2-7B",
+  #"load": "checkpoints/allc_tokompiler_700M",
+  "checkpoint_validation_with_forward_pass": False,
+
+  "tensorboard-dir": "tensorboard",
+  "log-dir": "logs",
+  "use_wandb": False,
+}

@@ -407,6 +407,13 @@ def setup_model_and_optimizer(
     model = get_model(
         neox_args=neox_args, inference=inference, get_key_value=get_key_value
     )
+    print_rank_0(model)  # VAV DEBUG
+    ## VAV DEBUG ##
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print_rank_0(name, p.shape)
+    ## VAV DEBUG ##
+
     optimizer, param_groups = get_optimizer(model=model, neox_args=neox_args)
     lr_scheduler = get_learning_rate_scheduler(optimizer=optimizer, neox_args=neox_args)
 
@@ -432,7 +439,7 @@ def setup_model_and_optimizer(
         )
         model.total_params = get_total_params(model.module)
         print_rank_0(f' > total params: {"{:,}".format(model.total_params)}')
-
+#        raise ValueError("Stopping here so we can check!")  ## VAV DEBUG
         if neox_args.is_pipe_parallel:
             model.set_has_attention_mask(True)
             model.set_batch_fn(model.module._megatron_batch_fn)

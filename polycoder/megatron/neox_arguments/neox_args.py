@@ -974,3 +974,8 @@ class NeoXArgsFinetuning(NeoXArgsTemplate):
     """
     Path to data for finetuning.
     """
+
+    data_keys_collate: list = None
+    """
+    A list of data keys to collate in a Tensor without padding.
+    """

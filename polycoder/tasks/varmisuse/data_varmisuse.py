@@ -7,6 +7,7 @@ from megatron import mpu, print_rank_0
 from megatron.utils import get_ltor_masks_and_position_ids, average_losses_across_data_parallel_group
 from megatron.data.gpt2_dataset import _build_index_mappings
 
+from tasks.data_utils import make_data_loader_with_padding
 import datasets as trd
 from sklearn.metrics import accuracy_score
 
@@ -117,59 +118,59 @@ def build_varmisuse_datasets(neox_args):
         return tokenized_datasets["train"], tokenized_datasets["validation"], tokenized_datasets["test"]
 
 
-def collate_fn_pad(batch):
-    from torch.utils.data._utils.collate import default_collate
-
-    elem = batch[0]
-    elem_type = type(elem)
-
-    try:
-        out_dict = {}
-        for key in elem:
-            item_list = [d[key] for d in batch]
-            if key in ['input_ids', 'attention_mask']:
-            # if key in ['text', 'attention_mask']:
-                # Custom behavior: pad this baby!
-                lengths = torch.IntTensor([sample.size(dim=0) for sample in item_list])
-                padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
-                out_dict.update({'lengths': lengths})
-                out_dict.update({key: padded_item})
-            elif key in ['has_bug', 'error_location']:  #['repair_targets', 'repair_candidates']:
-                # Default collate behavior for a dictionary, according to pytorch 2.0.0
-                out_dict.update({key: default_collate(item_list)})
-            else:
-                # Custom behavior for fields that are lists of lists
-                out_dict.update({key: item_list})
-        return elem_type(out_dict)
-    except TypeError:
-        raise ValueError(f"This mapping type {elem_type} may not support `__init__(iterable)`.")
-
-
-def make_data_loader_with_padding(dataset, neox_args):
-    from megatron.data.samplers import DistributedBatchSampler
-
-    """Build dataloader given an input dataset."""
-    if dataset is None:
-        return None
-    # Data parallel arguments.
-    world_size = mpu.get_data_parallel_world_size()
-    rank = mpu.get_data_parallel_rank()
-    global_batch_size = neox_args.batch_size * world_size
-    num_workers = neox_args.num_workers
-
-    # Use a simple sampler with distributed batch sampler.
-    sampler = torch.utils.data.SequentialSampler(dataset)
-    batch_sampler = DistributedBatchSampler(sampler=sampler,
-                                            batch_size=global_batch_size,
-                                            drop_last=True,
-                                            rank=rank,
-                                            world_size=world_size)
-    # Torch dataloader.
-    return torch.utils.data.DataLoader(dataset,
-                                       batch_sampler=batch_sampler,
-                                       num_workers=num_workers,
-                                       collate_fn=collate_fn_pad,
-                                       pin_memory=True)
+# def collate_fn_pad(batch):
+#     from torch.utils.data._utils.collate import default_collate
+#
+#     elem = batch[0]
+#     elem_type = type(elem)
+#
+#     try:
+#         out_dict = {}
+#         for key in elem:
+#             item_list = [d[key] for d in batch]
+#             if key in ['input_ids', 'attention_mask']:
+#             # if key in ['text', 'attention_mask']:
+#                 # Custom behavior: pad this baby!
+#                 lengths = torch.IntTensor([sample.size(dim=0) for sample in item_list])
+#                 padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
+#                 out_dict.update({'lengths': lengths})
+#                 out_dict.update({key: padded_item})
+#             elif key in ['has_bug', 'error_location']:  #['repair_targets', 'repair_candidates']:
+#                 # Default collate behavior for a dictionary, according to pytorch 2.0.0
+#                 out_dict.update({key: default_collate(item_list)})
+#             else:
+#                 # Custom behavior for fields that are lists of lists
+#                 out_dict.update({key: item_list})
+#         return elem_type(out_dict)
+#     except TypeError:
+#         raise ValueError(f"This mapping type {elem_type} may not support `__init__(iterable)`.")
+#
+#
+# def make_data_loader_with_padding(dataset, neox_args):
+#     from megatron.data.samplers import DistributedBatchSampler
+#
+#     """Build dataloader given an input dataset."""
+#     if dataset is None:
+#         return None
+#     # Data parallel arguments.
+#     world_size = mpu.get_data_parallel_world_size()
+#     rank = mpu.get_data_parallel_rank()
+#     global_batch_size = neox_args.batch_size * world_size
+#     num_workers = neox_args.num_workers
+#
+#     # Use a simple sampler with distributed batch sampler.
+#     sampler = torch.utils.data.SequentialSampler(dataset)
+#     batch_sampler = DistributedBatchSampler(sampler=sampler,
+#                                             batch_size=global_batch_size,
+#                                             drop_last=True,
+#                                             rank=rank,
+#                                             world_size=world_size)
+#     # Torch dataloader.
+#     return torch.utils.data.DataLoader(dataset,
+#                                        batch_sampler=batch_sampler,
+#                                        num_workers=num_workers,
+#                                        collate_fn=collate_fn_pad,
+#                                        pin_memory=True)
 
 
 def build_train_valid_test_data_iterators(neox_args):

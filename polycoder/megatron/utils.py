@@ -47,6 +47,20 @@ def reduce_losses(losses):
     return reduced_losses
 
 
+def average_losses_across_data_parallel_group(losses):
+    """Similar to above, but incorporates mpu data_parallel_group.
+    VAV Taken from current Megatron code
+    TODO: TEST THIS!"""
+    averaged_losses = torch.cat(
+        [loss.clone().detach().view(1) for loss in losses])
+    torch.distributed.all_reduce(averaged_losses,
+                                 group=mpu.get_data_parallel_group())
+    averaged_losses = averaged_losses / \
+        torch.distributed.get_world_size(group=mpu.get_data_parallel_group())
+
+    return averaged_losses
+
+
 def report_memory(name):
     """Simple GPU memory report."""
     mega_bytes = 1024.0 * 1024.0

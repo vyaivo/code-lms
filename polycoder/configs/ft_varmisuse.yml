@@ -1,0 +1,18 @@
+{
+  # BPE
+#  "data-path": "lm_data/polycoder_proc/vm_", #"/home/vyvo/data/var-misuse/great/lm_processed/source_code_processed",
+#  "data-key": "source_code",
+#  "other-data-keys": ["error_location", "repair_targets", "repair_candidates", "has_bug"],
+  "finetune-data-path": "lm_data/hf/",  #"/home/vyvo/data/var-misuse/great/lm_processed/hf/",
+  "tokenizer-type": "GPT2BPETokenizer",
+  "vocab-file": "data/gpt2-vocab.json",
+  "merge-file": "data/gpt2-merges.txt",
+  "save": "checkpoints/varmisuse/test",
+  "split": "109,11,58",
+  
+  "checkpoint_validation_with_forward_pass": False,
+
+  "tensorboard-dir": "tensorboard",
+  "log-dir": "logs",
+  "use_wandb": False,
+}

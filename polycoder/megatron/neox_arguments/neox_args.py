@@ -963,4 +963,14 @@ class NeoXArgsTextgen(NeoXArgsTemplate):
     Tasks to evaluate on using lm_eval_harness
     """
 
-    
+
+@dataclass
+class NeoXArgsFinetuning(NeoXArgsTemplate):
+    """
+    Finetuning arguments that SUPPLEMENT training arguments
+    """
+
+    finetune_data_path: str = None
+    """
+    Path to data for finetuning.
+    """

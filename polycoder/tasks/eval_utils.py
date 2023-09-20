@@ -1,3 +1,4 @@
+# Taken from more current Megatron code base
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Evaluation utilities."""
@@ -8,9 +9,9 @@ from functools import partial
 
 import torch
 
-from megatron import get_args
+# from megatron import get_args
 from megatron import print_rank_last, is_last_rank
-from megatron.core import mpu
+from megatron import mpu
 from megatron.schedules import get_forward_backward_func
 from tasks.finetune_utils import build_data_loader
 from tasks.finetune_utils import process_batch
@@ -18,7 +19,7 @@ from tasks.finetune_utils import process_batch
 
 def accuracy_func_provider(single_dataset_provider):
     """Provide function that calculates accuracies."""
-    args = get_args()
+    # args = get_args()
 
     # Build dataloaders.
     datapaths = args.valid_data
@@ -66,7 +67,7 @@ def calculate_correct_answers(name, model, dataloader,
                               epoch, output_predictions):
     """Calculate correct over total answers and return prediction if the
     `output_predictions` is true."""
-    args = get_args()
+    # args = get_args()
     forward_backward_func = get_forward_backward_func()
     start_time = time.time()
     for m in model:

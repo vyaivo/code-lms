@@ -337,3 +337,103 @@ class GPT2ModelPipe(PipelineModule, torch.nn.Module):
                                   self.activation_checkpoint_func,
                                   parent_class_name=self.__class__.__name__)
         return model
+
+
+class GPT2Finetune(GPT2ModelPipe):
+    """
+    Just modifies the GPT2 model by removing the projection to the word embeddings.
+    TODO: test if this work with loading pre-trained weights
+    """
+
+    def __init__(self, neox_args, **kwargs):
+        super().__init__(neox_args, **kwargs)
+
+    def init_specs(self):
+        weight_tying = not self.neox_args.no_weight_tying
+        if self.embedding_type == 'rpe':
+            hidden_size_per_attention_head = mpu.divide(
+                    self.neox_args.hidden_size, self.neox_args.num_attention_heads
+                    )
+            rpe_scale = math.sqrt(hidden_size_per_attention_head)
+            rpe_emb = ParallelRelativePositionBias(neox_args=self.neox_args,
+                                                   scale=rpe_scale,
+                                                   causal=True,
+                                                   num_buckets=self.neox_args.rpe_num_buckets,
+                                                   max_distance=self.neox_args.rpe_max_distance,
+                                                   heads=self.neox_args.num_attention_heads)
+        self.specs = []
+        # Embedding layer
+        # input will be (input_ids, position_ids, attention_mask) in Training
+        # and (input_ids, position_ids, attention_mask, layer_past) in Inference
+        if weight_tying:
+            self.specs.append(TiedLayerSpec('embed',
+                                            EmbeddingPipe,
+                                            self.neox_args,
+                                            self.hidden_size,
+                                            self.neox_args.padded_vocab_size,
+                                            self.neox_args.max_position_embeddings,
+                                            self.neox_args.hidden_dropout,
+                                            self.init_method,
+                                            self.num_tokentypes,
+                                            tied_weight_attr='word_embeddings_weight'))
+        else:
+            self.specs.append(LayerSpec(EmbeddingPipe,
+                                        self.neox_args,
+                                        self.hidden_size,
+                                        self.neox_args.padded_vocab_size,
+                                        self.neox_args.max_position_embeddings,
+                                        self.neox_args.hidden_dropout,
+                                        self.init_method,
+                                        self.num_tokentypes))
+
+        # NB: in inference, the attention mask always needs to be the *last* item in the args when being passed from
+        # one stage to the next, because deepspeed is hacks on top of hacks.
+        #
+        # outputs are now
+        #           Train: (hidden_states,  attention_mask)
+        #           Inference: (hidden_states, layer_past, attention_mask)
+
+        self.specs.append(_pre_transformer_block)
+
+        # Transformer layers
+        for i in range(self.neox_args.num_layers):
+            layer_type = self.neox_args.attention_config[i]
+            if layer_type in ["gmlp", "amlp"]:
+                self.specs.append(
+                    LayerSpec(
+                        GMLPBlock,
+                        init_method=self.init_method,
+                        layer_number=i,
+                        output_layer_init_method=self.output_layer_init_method,
+                        neox_args=self.neox_args,
+                        mask_fn=gpt2_attention_mask_func
+                    )
+                )
+            else:
+                self.specs.append(
+                    LayerSpec(
+                        ParallelTransformerLayerPipe,
+                        neox_args=self.neox_args,
+                        attention_mask_func=gpt2_attention_mask_func,
+                        init_method=self.init_method,
+                        output_layer_init_method=self.output_layer_init_method,
+                        layer_number=i,
+                        rpe=rpe_emb if self.neox_args.pos_emb == 'rpe' else None,
+                        rotary=self.neox_args.pos_emb == 'rotary',
+                        get_key_value=self.get_key_value
+                    )
+                )
+
+        self.specs.append(_post_transformer_block)
+
+        # NormPipe is a helper class to pass presents through to the output when doing inference
+        norm, eps = get_norm(self.neox_args)
+        self.specs.append(
+            LayerSpec(NormPipe,
+                      norm,
+                      self.neox_args.hidden_size,
+                      eps=eps))
+
+        # outputs are now
+        #           Train: hidden_states
+        #           Inference: (hidden_states, presents)

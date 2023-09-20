@@ -76,7 +76,7 @@ def compute_varmisuse_loss(label_data, logits, metric=False):
 
 
 def build_varmisuse_datasets(neox_args):
-    if os.path.exists(os.path.join(neox_args.finetune_data_path, "tests/data.arrow")):
+    if os.path.exists(os.path.join(neox_args.finetune_data_path, "test/data.arrow")):
         tokenized_datasets = trd.load_from_disk(neox_args.finetune_data_path)
         # tokenized_datasets = tokenized_datasets.rename_column("input_ids", "text")
     else:

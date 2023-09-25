@@ -3,11 +3,15 @@
 
 """Classification model."""
 
+import glob
+import os
 import torch
 
 from functools import partial
 from megatron import mpu, print_rank_0
 from megatron.training import get_batch_pipe
+from megatron.checkpointing import load_checkpoint
+
 # from megatron.model.enums import AttnMaskType
 # from megatron.model.bert_model import bert_extended_attention_mask, bert_position_ids
 # from megatron.model.utils import get_linear_layer
@@ -32,7 +36,7 @@ def get_language_model(neox_args, inference=False, get_key_value=True):
     model = GPT2Finetune(
         neox_args=neox_args,
         num_tokentypes=0,
-        parallel_output=True,
+        parallel_output=False,  # VAV DEBUG TRAIN ERROR
         topology=mpu.get_topology(),
         inference=inference,
         get_key_value=get_key_value,
@@ -42,21 +46,7 @@ def get_language_model(neox_args, inference=False, get_key_value=True):
     if neox_args.soft_prompt_tuning is not None and neox_args.soft_prompt_tuning.get(
         "enabled", False
     ):
-        soft_prompt = SoftEmbedding(
-            neox_args,
-            wte=getattr(model, "0").word_embeddings,
-            n_tokens=neox_args.soft_prompt_tuning.get("n_tokens", 10),
-            init_string=neox_args.soft_prompt_tuning.get("init_string", ""),
-            init_range=neox_args.soft_prompt_tuning.get("init_range", 0.5),
-        )
-        model.insert_layers(
-            layers=soft_prompt, idx=1
-        )  # insert the soft prompt layer directly after the word embeddings
-
-        # freeze everything but the soft prompt
-        for name, param in model.named_parameters():
-            if not "soft_embedding" in name:
-                param.requires_grad = False
+        raise NotImplementedError
 
     if not neox_args.is_pipe_parallel:
         # Export PipeParallel model to nn.Sequential model to avoid the overhead of deepspeed's pipe parallel training
@@ -78,13 +68,16 @@ class Classification(torch.nn.Module):
     def __init__(self,
                  neox_args,
                  num_classes,
-                 post_process=True):
+                 post_process=True,
+                 load_lm_checkpoint=None):
         super().__init__()
 
         self.num_classes = num_classes
         self.post_process = post_process
 
         self.language_model = get_language_model(neox_args)
+        if load_lm_checkpoint:
+            neox_args.iteration = self.load_checkpoint(neox_args)
         self._language_model_key = 'polycoder'
 
         # Multi-choice head.
@@ -92,32 +85,61 @@ class Classification(torch.nn.Module):
             self.pooler = torch.nn.Linear(neox_args.hidden_size, neox_args.hidden_size)
             self._pooler_key = 'pooler'
 
-            self.classification_dropout = torch.nn.Dropout(neox_args.hidden_dropout)
-            # Next 4 lines taken from Megatron-LM model.utils.get_linear_layer
-            self.classification_head = torch.nn.Linear(neox_args.hidden_size,
-                                                       self.num_classes)
-            with torch.no_grad():
-                self.classification_head.bias.zero_()
-            self._classification_head_key = 'classification_head'
+        self.classification_dropout = torch.nn.Dropout(neox_args.hidden_dropout)
+        self.classification_head = torch.nn.Linear(neox_args.hidden_size,
+                                                   self.num_classes)
+        with torch.no_grad():
+            self.classification_head.bias.zero_()
+        self._classification_head_key = 'classification_head'
 
     # def set_input_tensor(self, input_tensor):
     #     """See megatron.model.transformer.set_input_tensor()"""
     #     self.language_model.set_input_tensor(input_tensor)
 
-    def post_process_step(self, lm_output, pool_seq_index=0):
+    def load_checkpoint(self, neox_args):
+        load_dir = neox_args.load
+        latest_path = os.path.join(load_dir, 'latest')
+        if os.path.isfile(latest_path):
+            with open(latest_path, 'r') as fd:
+                tag = fd.read().strip()
+        # mp_load_path = os.path.join(load_dir, str(tag), 'mp_rank_00_model_states.pt')
+        # checkpoint = torch.load(mp_load_path, map_location=lambda storage, loc:storage)
 
-        assert self.post_process, "Called post_process_step but those layers don't exist!"
+        curr_ckpt_path = os.path.join(load_dir, tag)
+        ckpt_list = glob.glob(curr_ckpt_path + '/layer_*-model_00-model_states.pt')
+        # import pdb; pdb.set_trace()
+        # fwd_funcs = []
+        # for idx, layer in enumerate(self.language_model.sequential):
+        #     if isinstance(layer, torch.nn.Module):
+        #         if len(fwd_funcs) < 1 and hasattr(layer, 'load_state_dict'):
+        #             prev = layer.word_embeddings.weight.data.clone()
+        #             prev_idx = idx
+        #         fwd_funcs.append(layer)
+        #     else:
+        #         print(f"layer {idx} is not a module")
+        #         import pdb; pdb.set_trace()
 
-        # Pools over a specific token -- default is start of the sequence
-        print_rank_0("VAV DEBUG:", lm_output.shape)  # batch x seq x emb_size
-        pooled_output = self.pooler(lm_output[:, pool_seq_index, :])
-        pooled_output = torch.tanh(pooled_output)
+        for idx, layer in enumerate(self.language_model.sequential):
+            layer_ckpt_path = curr_ckpt_path + f'/layer_{idx:02d}-model_00-model_states.pt'
+            if layer_ckpt_path in ckpt_list:
+                layer.load_state_dict(torch.load(layer_ckpt_path, map_location=lambda storage, loc: storage), strict=True)
+                print(f"Loaded {layer_ckpt_path} to language model!")
 
-        classification_output = self.classification_dropout(pooled_output)
+    def forward_step(self, lm_output, pool_seq_index=0):
+
+        if self.post_process:
+            # Pools over a specific token -- default is start of the sequence
+            # print_rank_0("VAV DEBUG:", lm_output.shape)  # batch x seq x emb_size
+            pooled_output = self.pooler(lm_output[:, pool_seq_index, :])
+            classif_input = torch.tanh(pooled_output)
+        else:
+            classif_input = lm_output
+
+        classification_output = self.classification_dropout(classif_input)
         classification_logits = self.classification_head(classification_output)
 
         # Reshape back to separate choices.
-        classification_logits = classification_logits.view(-1, self.num_classes)
+        # classification_logits = classification_logits.view(-1, self.num_classes)
         return classification_logits
 
     def state_dict_for_save_checkpoint(self, prefix='', keep_vars=False):
@@ -136,8 +158,8 @@ class Classification(torch.nn.Module):
     def load_state_dict(self, state_dict, strict=True):
         """Customized load."""
 
-        self.language_model.load_state_dict(
-            state_dict[self._language_model_key], strict=strict)
+        if state_dict is not None:
+            self.language_model.load_state_dict(state_dict, strict=strict)
         if self.post_process:
             if self._classification_head_key in state_dict:
                 self.classification_head.load_state_dict(

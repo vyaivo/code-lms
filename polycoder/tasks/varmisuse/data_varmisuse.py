@@ -4,12 +4,12 @@ import os
 import torch
 
 from megatron import mpu, print_rank_0
-from megatron.utils import get_ltor_masks_and_position_ids, average_losses_across_data_parallel_group
-from megatron.data.gpt2_dataset import _build_index_mappings
+from megatron.utils import get_ltor_masks_and_position_ids
+    #, average_losses_across_data_parallel_group
+# from megatron.data.gpt2_dataset import _build_index_mappings
 
 from tasks.data_utils import make_data_loader_with_padding
 import datasets as trd
-from sklearn.metrics import accuracy_score
 
 # DATASET KEYS:
 # 'has_bug'
@@ -20,157 +20,46 @@ from sklearn.metrics import accuracy_score
 # 'source_code'
 
 
-def compute_varmisuse_loss(label_data, logits, metric=False):
-    # Unpack label data
-    # ((data_b["error_location"], data_b["repair_targets"]), (data_b["has_bug"], data_b["repair_candidates"]))
-    (error_locations, repair_loc), (lengths, has_bug, repair_cands) = label_data
-
-    import pdb; pdb.set_trace()
-
-    nbatch, seq_length, _ = logits.shape
-    n_buggy = torch.sum(has_bug).item()
-    eps = 1e-16
-    # Create sequence length mask. Mask values of 1 are kept. Default 0.
-    mask = torch.zeros((nbatch, seq_length), dtype=torch.long)
-    for b in range(nbatch):
-        mask[b, repair_cands[b]] = 1.
-
-    # Localization loss is simply calculated with sparse CE
-    loc_pred = logits[:, :, 0]  # * mask  # (nbatch, seq_length)
-    loc_loss = torch.nn.functional.cross_entropy(loc_pred, error_locations)
-    if metric:
-        loc_max = loc_pred.detach().clone().softmax(dim=-1).argmax(dim=-1)
-        loc_acc_nobug = accuracy_score(y_pred=loc_max[~has_bug],
-                                       y_true=error_locations[~has_bug])
-        loc_acc_bug = accuracy_score(y_pred=loc_max[has_bug],
-                                     y_true=error_locations[has_bug])
-    else:
-        loc_acc_nobug, loc_acc_bug, mean_repair_acc, joint_acc = None, None, None, None
-
-    # Repair loss is only computed at buggy samples (with error locations),
-    # using (negative) cross-entropy
-    repair_pred = logits[:, :, 1] * mask  # (nbatch, seq_length)
-    # repair_locations becomes a (nbatch, seq_length) Tensor of mostly 0s
-    #  it has values of 1 if it is a repair location. each row can have >1 label
-    target_mask = torch.vstack(
-        [torch.nn.functional.one_hot(rlab, num_classes=seq_length).sum(dim=0) for ii, rlab in enumerate(repair_loc)])
-    ### trying to match hellendoorn metric
-    pointer_logits = repair_pred + (1.0 - mask) * eps
-    pointer_probs = torch.nn.functional.softmax(pointer_logits, dim=-1)
-    target_probs = (target_mask * pointer_probs).sum(-1)
-    repair_loss = -torch.log(target_probs[has_bug] + eps).sum() / (eps + n_buggy)
-    # Since this is a multi-label problem, we need a threshold for marking a location.
-    # For simplicity and to follow the previous work, we use a probability thresh of 0.5.
-    if metric:
-        ### trying to match hellendoorn metric
-        target_loc_acc = (target_probs[has_bug].detach().clone() > 0.5).type(torch.FloatTensor)
-        # Also compute the joint accuracy, but on buggy samples only
-        lacc_by_sample = (loc_max[has_bug] == error_locations[has_bug]).type(torch.FloatTensor)
-        joint_acc = (lacc_by_sample * target_loc_acc).mean()
-    loss = loc_loss + repair_loss
-
-    # Reduce loss for logging.
-    averaged_loss = average_losses_across_data_parallel_group([loss])
-
-    # return loss, {'lm loss': averaged_loss[0]}
-    return loss, (loc_acc_nobug, loc_acc_bug, mean_repair_acc, joint_acc)
-
-
 def build_varmisuse_datasets(neox_args):
-    if os.path.exists(os.path.join(neox_args.finetune_data_path, "test/data.arrow")):
-        tokenized_datasets = trd.load_from_disk(neox_args.finetune_data_path)
-        # tokenized_datasets = tokenized_datasets.rename_column("input_ids", "text")
-    else:
-        # Build the dataset
-        from datasets import Sequence, Value
-        from megatron.tokenizer import build_tokenizer
-        tokenizer = build_tokenizer(neox_args)
+    # if os.path.exists(os.path.join(neox_args.finetune_data_path, "test/data.arrow")):
+    #     tokenized_datasets = trd.load_from_disk(neox_args.finetune_data_path)
+    #     # tokenized_datasets = tokenized_datasets.rename_column("input_ids", "text")
+    # else:
+    # Build the dataset
+    from datasets import Sequence, Value
+    from megatron.tokenizer import build_tokenizer
+    tokenizer = build_tokenizer(neox_args)
 
-        dataset_dir = os.path.dirname(os.path.dirname(neox_args.finetune_data_path))
-        splits = ['train', 'dev', 'eval']
-        split_rename = ['train', 'validation', 'test']
-        split_dict = {}
-        for s, sr in zip(splits, split_rename):
-            sfiles = glob.glob(f'{dataset_dir}/{s}/*.jsonl')
-            assert isinstance(sfiles, list), f"Did not get a list of {s} files for {dataset_dir}/{s}/"
-            assert len(sfiles) > 0, f"Did not get a list of {s} files for {dataset_dir}/{s}/"
-            split_dict[sr] = sfiles
-        d = trd.load_dataset('json', data_files=split_dict)
+    dataset_dir = os.path.dirname(os.path.dirname(neox_args.finetune_data_path))
+    splits = ['train', 'dev', 'eval']
+    split_rename = ['train', 'validation', 'test']
+    split_dict = {}
+    for s, sr in zip(splits, split_rename):
+        sfiles = glob.glob(f'{dataset_dir}/{s}/*.jsonl')
+        assert isinstance(sfiles, list), f"Did not get a list of {s} files for {dataset_dir}/{s}/"
+        assert len(sfiles) > 0, f"Did not get a list of {s} files for {dataset_dir}/{s}/"
+        split_dict[sr] = sfiles
+    d = trd.load_dataset('json', data_files=split_dict)
 
-        def tokenize(example):
-            example["input_ids"] = tokenizer.tokenize(example["source_code"])
-            return example
+    def tokenize(example):
+        example["input_ids"] = tokenizer.tokenize(example["source_code"])
+        return example
 
-        tokenized_datasets = d.map(tokenize, batched=False)
-        feature_types = trd.Features({
-            "input_ids": Sequence(Value("int32")),
-            "error_location": Sequence(Value("int32")),
-            "repair_targets": Sequence(Value("int32")),
-            "repair_candidates": Sequence(Value("int32")),
-            "has_bug": Sequence(Value("bool"))
-        })
-        for split, ds in tokenized_datasets.items():
-            ds.set_format(type="torch",
-                          columns=['input_ids', 'error_location', 'repair_targets',
-                                   'repair_candidates', 'has_bug'])
-        tokenized_datasets.save_to_disk(neox_args.finetune_data_path)
+    tokenized_datasets = d.map(tokenize, batched=False)
+    feature_types = trd.Features({
+        "input_ids": Sequence(Value("int32")),
+        "error_location": Sequence(Value("int32")),
+        "repair_targets": Sequence(Value("int32")),
+        "repair_candidates": Sequence(Value("int32")),
+        "has_bug": Sequence(Value("bool"))
+    })
+    for split, ds in tokenized_datasets.items():
+        ds.set_format(type="torch",
+                      columns=['input_ids', 'error_location', 'repair_targets',
+                               'repair_candidates', 'has_bug'])
+    # tokenized_datasets.save_to_disk(neox_args.finetune_data_path)
 
-        return tokenized_datasets["train"], tokenized_datasets["validation"], tokenized_datasets["test"]
-
-
-# def collate_fn_pad(batch):
-#     from torch.utils.data._utils.collate import default_collate
-#
-#     elem = batch[0]
-#     elem_type = type(elem)
-#
-#     try:
-#         out_dict = {}
-#         for key in elem:
-#             item_list = [d[key] for d in batch]
-#             if key in ['input_ids', 'attention_mask']:
-#             # if key in ['text', 'attention_mask']:
-#                 # Custom behavior: pad this baby!
-#                 lengths = torch.IntTensor([sample.size(dim=0) for sample in item_list])
-#                 padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
-#                 out_dict.update({'lengths': lengths})
-#                 out_dict.update({key: padded_item})
-#             elif key in ['has_bug', 'error_location']:  #['repair_targets', 'repair_candidates']:
-#                 # Default collate behavior for a dictionary, according to pytorch 2.0.0
-#                 out_dict.update({key: default_collate(item_list)})
-#             else:
-#                 # Custom behavior for fields that are lists of lists
-#                 out_dict.update({key: item_list})
-#         return elem_type(out_dict)
-#     except TypeError:
-#         raise ValueError(f"This mapping type {elem_type} may not support `__init__(iterable)`.")
-#
-#
-# def make_data_loader_with_padding(dataset, neox_args):
-#     from megatron.data.samplers import DistributedBatchSampler
-#
-#     """Build dataloader given an input dataset."""
-#     if dataset is None:
-#         return None
-#     # Data parallel arguments.
-#     world_size = mpu.get_data_parallel_world_size()
-#     rank = mpu.get_data_parallel_rank()
-#     global_batch_size = neox_args.batch_size * world_size
-#     num_workers = neox_args.num_workers
-#
-#     # Use a simple sampler with distributed batch sampler.
-#     sampler = torch.utils.data.SequentialSampler(dataset)
-#     batch_sampler = DistributedBatchSampler(sampler=sampler,
-#                                             batch_size=global_batch_size,
-#                                             drop_last=True,
-#                                             rank=rank,
-#                                             world_size=world_size)
-#     # Torch dataloader.
-#     return torch.utils.data.DataLoader(dataset,
-#                                        batch_sampler=batch_sampler,
-#                                        num_workers=num_workers,
-#                                        collate_fn=collate_fn_pad,
-#                                        pin_memory=True)
+    return tokenized_datasets["train"], tokenized_datasets["validation"], tokenized_datasets["test"]
 
 
 def build_train_valid_test_data_iterators(neox_args):
@@ -284,7 +173,7 @@ def broadcast_data_list(keys, data):
             if isinstance(data[k], list):
                 data[k] = [d.cuda() for d in data[k]]
             else:
-                data[k].cuda()
+                data[k] = data[k].cuda()
             data_list.append(data[k])
     else:
         data_list = [None] * len(keys)
@@ -304,8 +193,23 @@ def _get_batch(neox_args, tokenizer, keys, data):
 
     # Unpack.
     tokens = data_b["input_ids"].long().contiguous()
-    labels = ((data_b["error_location"], data_b["repair_targets"]),
-              (data_b["lengths"], data_b["has_bug"], data_b["repair_candidates"]))
+
+    # import pdb; pdb.set_trace()
+    # VAV: Create the label masks here?
+    nbatch, seq_length = tokens.shape
+    # Create sequence length mask. Mask values of 1 are kept. Default 0.
+    mask = torch.zeros((nbatch, seq_length), dtype=torch.long)  #, device=tokens.device)
+    for b in range(nbatch):
+        mask[b, data_b["repair_candidates"][b]] = 1.
+    target_mask = torch.vstack(
+        [torch.nn.functional.one_hot(rlab, num_classes=seq_length).sum(dim=0) for ii, rlab in
+         enumerate(data_b["repair_targets"])]
+    )  #.to(tokens.device)
+
+    # (error_locations, target_mask), (mask, has_bug)
+    # labels = ((data_b["error_location"], data_b["repair_targets"]),
+    #           (data_b["lengths"], data_b["has_bug"], data_b["repair_candidates"]))
+    labels = (data_b["error_location"], target_mask, mask, data_b["has_bug"])
 
     # Get the masks and position ids.
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
@@ -319,7 +223,8 @@ def get_batch(neox_args, data_iterator):
     """Generate a batch"""
 
     # Items and their type.
-    keys = ['input_ids', 'error_location', 'repair_targets', 'repair_candidates', 'has_bug', 'lengths']
+    # keys = ['input_ids', 'error_location', 'repair_targets', 'repair_candidates', 'has_bug']  #, 'lengths']
+    keys = ['input_ids', 'error_location', 'repair_targets', 'repair_candidates', 'has_bug']
 
     # Broadcast data.
     if data_iterator is not None:

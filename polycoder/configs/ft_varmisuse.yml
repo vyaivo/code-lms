@@ -6,6 +6,8 @@
   "vocab-file": "data/gpt2-vocab.json",
   "merge-file": "data/gpt2-merges.txt",
   "save": "checkpoints/varmisuse/test",
+  "load": "checkpoints/checkpoints-160M/",
+  "finetune": True,
   "split": "109,11,58",
   
   "checkpoint_validation_with_forward_pass": False,

@@ -11,7 +11,7 @@ import re
 from megatron import mpu
 
 
-def collate_fn_pad(batch, data_keys_to_collate=[]):
+def collate_fn_pad(batch, data_keys_to_collate=[], report_lengths=False):
     from torch.utils.data._utils.collate import default_collate
 
     elem = batch[0]
@@ -23,10 +23,11 @@ def collate_fn_pad(batch, data_keys_to_collate=[]):
             item_list = [d[key] for d in batch]
             if key in ['text', 'input_ids', 'attention_mask']:
                 # Custom behavior: pad this baby!
-                lengths = torch.IntTensor([sample.size(dim=0) for sample in item_list])
                 padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
-                out_dict.update({'lengths': lengths})
                 out_dict.update({key: padded_item})
+                if report_lengths:
+                    lengths = torch.IntTensor([sample.size(dim=0) for sample in item_list])
+                    out_dict.update({'lengths': lengths})
             elif key in data_keys_to_collate:
                 # Default collate behavior for a dictionary, according to pytorch 2.0.0
                 out_dict.update({key: default_collate(item_list)})

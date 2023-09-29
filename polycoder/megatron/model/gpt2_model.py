@@ -38,6 +38,7 @@ from megatron.model.word_embeddings import EmbeddingPipe, SoftEmbedding
 from deepspeed.pipe import PipelineModule, LayerSpec, TiedLayerSpec
 from typing import Union, List
 
+
 def gpt2_attention_mask_func(attention_scores, ltor_mask):
     attention_scores.masked_fill_(ltor_mask, -10000.0)
     return attention_scores
@@ -345,8 +346,32 @@ class GPT2Finetune(GPT2ModelPipe):
     TODO: test if this work with loading pre-trained weights
     """
 
-    def __init__(self, neox_args, **kwargs):
-        super().__init__(neox_args, **kwargs)
+    def __init__(self, neox_args, num_tokentypes=0, parallel_output=True, topology=None, inference=False,
+                 get_key_value=True, loss_fn=None):
+        # super().__init__(neox_args, **kwargs)
+        self.neox_args = neox_args
+
+        self._inference = inference
+        self.get_key_value = get_key_value if inference else False
+        self.parallel_output = parallel_output
+        self.hidden_size = self.neox_args.hidden_size
+        self.num_tokentypes = num_tokentypes
+        self.init_method, self.output_layer_init_method = get_init_methods(self.neox_args)
+        self.embedding_type = self.neox_args.pos_emb
+        self.__topology__ = topology
+
+        self.specs = []
+        self.init_specs()
+        if self.neox_args.checkpoint_activations:
+            interval = self.neox_args.checkpoint_num_layers
+        else:
+            interval = 0
+        PipelineModule.__init__(self, layers=self.specs,
+                                loss_fn=loss_fn if not self._inference else None,
+                                topology=topology,
+                                activation_checkpoint_interval=interval,
+                                partition_method=neox_args.pipe_partition_method,
+                                checkpointable_layers=['GMLPBlock', 'ParallelTransformerLayerPipe'])
 
     def init_specs(self):
         weight_tying = not self.neox_args.no_weight_tying
@@ -437,3 +462,10 @@ class GPT2Finetune(GPT2ModelPipe):
         # outputs are now
         #           Train: hidden_states
         #           Inference: (hidden_states, presents)
+
+        def train_mode(self):
+            # set caching to false
+            recursive_setattr(self.forward_funcs, "get_key_value", False)
+            # # then set parallel output to true (more efficient training)
+            # self._set_parallel_output(True)
+

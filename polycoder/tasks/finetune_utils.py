@@ -2,23 +2,28 @@
 
 """Finetune utilities."""
 
+import gc
+# from torch.profiler import profile, record_function, ProfilerActivity
+
 from functools import partial
-import sys
+import math
+import os, sys
 import torch
 
 from datetime import datetime
 
+import deepspeed
 from megatron import print_rank_0
 from megatron import mpu
 from megatron.checkpointing import save_checkpoint
 from megatron.training import evaluate_and_print_results
-from megatron.training import training_log
+from megatron.training import training_log, train_step_pipe
 from megatron.utils import (
     OverflowMonitor,
-    get_noise_scale_logger
+    get_noise_scale_logger,
+    reduce_losses
 )
 
-import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -26,10 +31,22 @@ from varmisuse.data_varmisuse import get_batch as get_batch_fn
 
 
 def finetune_forward_step(data_iterator, model, neox_args, timers, compute_loss_fn,
-                          return_logits=False):
+                          return_logits=False, compute_metric=False, training=False):
     """Forward step."""
-    if neox_args.is_pipe_parallel:
-        raise NotImplementedError
+    if neox_args.is_pipe_parallel:  # and compute_metric:
+        # seq_model = model.module.to_sequential().to(torch.float32)
+        # if not training:
+        #     seq_model.eval()
+        # VAV: right now this doesn't return metrics, just the loss.
+        # if metric_fn:
+        #     outputs = model.eval_batch(data_iterator, return_logits=True)
+        #     loss, logits = outputs
+        #     metric_info = metric_fn(logits)
+        # else:
+        #     outputs = model.eval_batch(data_iterator, return_logits=return_logits)
+        #     return outputs
+    # elif neox_args.is_pipe_parallel:
+        return model.eval_batch(data_iterator, return_logits=return_logits)
 
     # Get the batch.
     if timers is not None:
@@ -37,29 +54,85 @@ def finetune_forward_step(data_iterator, model, neox_args, timers, compute_loss_
     tokens, labels, loss_mask, attention_mask, position_ids = get_batch_fn(
         neox_args=neox_args, data_iterator=data_iterator
     )
+    # import pdb; pdb.set_trace()
+    # if neox_args.fp16['fp16'] and neox_args.is_pipe_parallel and compute_metric:
+    #     tokens = tokens.to(model.local_rank, dtype=torch.half)
     if timers is not None:
         timers("batch generator").stop()
 
-    lm_output = model.module.language_model((tokens, position_ids, attention_mask))
-    output = model.module.forward_step(lm_output)
+    # if neox_args.is_pipe_parallel and compute_metric:
+    #     output = seq_model((tokens, position_ids, attention_mask), skip_activation_checkpoints=True)
+    # else:
+    output = model((tokens, position_ids, attention_mask))
+    # if not output.requires_grad:
+    #     for i, p in enumerate(model.parameters()):
+    #         if not p.requires_grad:
+    #             print(i, p.shape)
+    #         else:
+    #             print(i)
+    # import pdb; pdb.set_trace()
 
-    # loss = cross_entropy_loss_func(labels, output)
-    loss, _ = compute_loss_fn(labels, output, metric=False)
+    # VAV: changed order of loss function inputs to be compatible with deepspeed pipelining defaults
+    if compute_metric:
+        loss, metric_info = compute_loss_fn(output, labels, metric=True)
+        if return_logits:
+            return loss, output, metric_info
+        else:
+            return loss, metric_info
+    else:
+        loss = compute_loss_fn(output, labels, metric=False)
+        if return_logits:
+            return loss, output
+        else:
+            return loss
 
-    if return_logits:
-        return loss, output
-    return loss
+
+def evaluate_and_print_results(
+    neox_args,
+    eval_function,
+    prefix,
+    forward_step_func,
+    data_iterator,
+    model,
+    verbose=False,
+    timers=None,
+):
+    """Helper function to evaluate and dump results on screen."""
+    eval_output_dict = eval_function(
+        neox_args=neox_args,
+        forward_step_fn=forward_step_func,
+        data_iterator=data_iterator,
+        model=model,
+        verbose=verbose,
+        timers=timers,
+    )
+    string = f" validation results at {prefix} | "
+    for k, v in eval_output_dict.items():
+        if isinstance(v, dict):
+            for k2, v2 in v.items():
+                k3 = "_".join([k, k2])
+                string += f"{k3} value: {v2:.6E} | "
+                # Removed wandb log -- see megatron.training for this
+        else:
+            string += f"{k} value: {v:.6E} | "
+            # Removed wandb log -- see megatron.training for this
+
+    length = len(string) + 1
+    print_rank_0("-" * length)
+    print_rank_0(string)
+    print_rank_0("-" * length)
 
 
 def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_scheduler, loss_function):
     # TODO: use custom batching
     from megatron.training import backward_step
-    from megatron.utils import reduce_losses
     """Single training step."""
 
     # Pipeline parallelism schedules forward/backward/step
     if neox_args.is_pipe_parallel:
-        raise NotImplementedError
+        reduced_loss = train_step_pipe(
+            neox_args=neox_args, timers=timers, model=model, data_iterator=data_iterator
+        )
     else:
         losses = []
         for _ in range(neox_args.gradient_accumulation_steps):
@@ -77,18 +150,18 @@ def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_schedul
             losses.append(loss)
             # Calculate gradients, reduce across processes, and clip.
             timers("backward").start()
-            backward_step(
-                neox_args=neox_args,
-                timers=timers,
-                optimizer=optimizer,
-                model=model,
-                loss=loss,
-            )
+            try:
+                backward_step(
+                    neox_args=neox_args,
+                    timers=timers,
+                    optimizer=optimizer,
+                    model=model,
+                    loss=loss,
+                )
+            except Exception as e:
+                print(e)
+                import pdb; pdb.set_trace()
             timers("backward").stop()
-
-            # VAV: We get the forward_microstep and forward timer logging errors after the optimizer step
-            # if mpu.get_model_parallel_rank() == 1:
-            #     import pdb; pdb.set_trace()
 
             # Update parameters.
             timers("optimizer").start()
@@ -98,13 +171,11 @@ def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_schedul
                 raise ValueError("Must be using deepspeed to run neox")
             timers("optimizer").stop()
 
-            # if mpu.get_model_parallel_rank() == 1:
-            #     import pdb; pdb.set_trace()
-
+        # reduces losses across machines for logging
         overall_loss = reduce_losses(losses).mean()
         reduced_loss = {
-            "lm_loss": overall_loss  #reduce_losses(losses).mean()
-        }  # reduces losses across machines for logging
+            "lm_loss": overall_loss
+        }
 
     if neox_args.precision == "fp16" and model.optimizer.overflow:
         skipped_iter = 1
@@ -122,11 +193,12 @@ def finetune_loop(
     lr_scheduler,
     train_data_iterator,
     valid_data_iterator,
-    loss_function
+    loss_function,
+    eval_function
 ):
     """Train the model function. Simply modified from megatron.training to use a custom loss
     function and custom batching function"""
-    # TODO: use custom batching and loss functions
+    # TODO: use custom batching
 
     # Turn on training mode which enables dropout.
     model.train()
@@ -144,7 +216,20 @@ def finetune_loop(
     noise_scale_logger = get_noise_scale_logger(neox_args)
 
     # eval function
-    eval_forward = partial(finetune_forward_step, compute_loss_fn=loss_function)
+    eval_forward = partial(finetune_forward_step, compute_loss_fn=loss_function,
+                           return_logits=False, compute_metric=False, training=False)
+
+    # VAV DEBUG profiling
+    # def trace_handler(p):
+    #     output = p.key_averages(group_by_stack_n=5).table(sort_by="self_cuda_memory_usage", row_limit=10)
+    #     print(output)
+    #     p.export_chrome_trace(f"debug_trace_{p.step_num}.json")
+
+    # with profile(schedule=torch.profiler.schedule(wait=897, warmup=2, active=2, repeat=1),
+    #              activities=[ProfilerActivity.CPU],
+    #              with_stack=True,
+    #              profile_memory=True,
+    #              on_trace_ready=trace_handler) as prof:   # VAV DEBUG profiling
 
     # to monitor if we've skipped many iterations in a row and trigger an early exit
     overflow_monitor = OverflowMonitor(optimizer)
@@ -180,12 +265,15 @@ def finetune_loop(
             learning_rate=lr,
             iteration=iteration,
             loss_scale=optimizer.cur_scale if neox_args.precision == "fp16" else None,
-            report_memory_flag=report_memory_flag,
+            report_memory_flag=True, #report_memory_flag,
             skipped_iter=skipped_iter,
             model=model,
             optimizer=optimizer,
             noise_scale_logger=noise_scale_logger,
         )
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Checkpointing
         if (
@@ -208,17 +296,20 @@ def finetune_loop(
             and neox_args.do_valid
         ):
             prefix = "iteration {}".format(iteration)
-            evaluate_and_print_results(
-                neox_args=neox_args,
-                prefix=prefix,
-                forward_step_func=eval_forward,
-                data_iterator=valid_data_iterator,
-                model=model,
-                iteration=iteration,
-                verbose=False,
-                timers=timers,
-            )
-            # print_rank_0(f"VAV DEBUG losses: {overall_loss}")
+            with torch.profiler.record_function("EVALUATE LOOP"):
+                evaluate_and_print_results(
+                    neox_args=neox_args,
+                    eval_function=eval_function,
+                    prefix=prefix,
+                    forward_step_func=eval_forward,
+                    data_iterator=valid_data_iterator,
+                    model=model,
+                    verbose=False,
+                    timers=timers
+                )
+            # print(prof.key_averages().table)
+            # print(prof)
+            # import pdb; pdb.set_trace()
 
         if neox_args.exit_interval and iteration % neox_args.exit_interval == 0:
             torch.distributed.barrier()
@@ -230,11 +321,12 @@ def finetune_loop(
                 )
             )
             sys.exit()
+        # prof.step()  # VAV DEBUG profiling
 
     return iteration
 
 
-def finetune(neox_args, model_setup_function, build_data_iters_function, loss_function):
+def finetune(neox_args, model_setup_function, build_data_iters_function, loss_function, eval_function):
     """Main finetuning program.
     Based off of training.py/pretrain, but allowing the use of custom functions for:
         - data iteration
@@ -287,21 +379,21 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             train_data_iterator=train_data_iterator,
             valid_data_iterator=valid_data_iterator,
             loss_function=loss_function,
+            eval_function=eval_function
         )
 
-    # if neox_args.do_valid:
-    #     # TODO: use same function call as above
-    #     prefix = "the end of training for val data"
-    #     evaluate_and_print_results(
-    #         neox_args=neox_args,
-    #         prefix=prefix,
-    #         forward_step_func=finetune_step,
-    #         data_iterator=valid_data_iterator,
-    #         model=model,
-    #         iteration=iteration,
-    #         verbose=False,
-    #         timers=timers,
-    #     )
+    if neox_args.do_valid:
+        prefix = "the end of training for val data"
+        evaluate_and_print_results(
+            neox_args=neox_args,
+            eval_function=eval_function,
+            prefix=prefix,
+            forward_step_func=finetune_step,
+            data_iterator=valid_data_iterator,
+            model=model,
+            verbose=False,
+            timers=timers
+        )
 
     if neox_args.save and iteration != 0:
         save_checkpoint(
@@ -312,17 +404,17 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             lr_scheduler=lr_scheduler,
         )
 
-    # if neox_args.do_test:
-    #     # Run on test data.
-    #     prefix = "the end of training for test data"
-    #     evaluate_and_print_results(
-    #         neox_args=neox_args,
-    #         prefix=prefix,
-    #         forward_step_func=finetune_step,
-    #         data_iterator=test_data_iterator,
-    #         model=model,
-    #         iteration=0,  # iteration 0 in order to always use full test data
-    #         verbose=True,
-    #         timers=timers,
-    #     )
+    if neox_args.do_test:
+        # Run on test data.
+        prefix = "the end of training for test data"
+        evaluate_and_print_results(
+            neox_args=neox_args,
+            eval_function=eval_function,
+            prefix=prefix,
+            forward_step_func=finetune_step,
+            data_iterator=test_data_iterator,
+            model=model,
+            verbose=True,
+            timers=timers,
+        )
 

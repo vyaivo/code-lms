@@ -8,7 +8,7 @@ from megatron.utils import get_ltor_masks_and_position_ids
     #, average_losses_across_data_parallel_group
 # from megatron.data.gpt2_dataset import _build_index_mappings
 
-from tasks.data_utils import make_data_loader_with_padding
+from tasks.data_utils import make_data_loader_with_padding, broadcast_data_list
 import datasets as trd
 
 # DATASET KEYS:
@@ -41,8 +41,10 @@ def build_varmisuse_datasets(neox_args):
         split_dict[sr] = sfiles
     d = trd.load_dataset('json', data_files=split_dict)
 
+    # TODO: map the repair_targets and repair_candidates onto the LM TOKENS vs the original tokens :X
     def tokenize(example):
         example["input_ids"] = tokenizer.tokenize(example["source_code"])
+        example["length"] = len(example["input_ids"])
         return example
 
     tokenized_datasets = d.map(tokenize, batched=False)
@@ -51,12 +53,13 @@ def build_varmisuse_datasets(neox_args):
         "error_location": Sequence(Value("int32")),
         "repair_targets": Sequence(Value("int32")),
         "repair_candidates": Sequence(Value("int32")),
+        "length": Sequence(Value("int32")),
         "has_bug": Sequence(Value("bool"))
     })
     for split, ds in tokenized_datasets.items():
         ds.set_format(type="torch",
                       columns=['input_ids', 'error_location', 'repair_targets',
-                               'repair_candidates', 'has_bug'])
+                               'repair_candidates', 'has_bug', 'length'])
     # tokenized_datasets.save_to_disk(neox_args.finetune_data_path)
 
     return tokenized_datasets["train"], tokenized_datasets["validation"], tokenized_datasets["test"]
@@ -96,10 +99,11 @@ def build_train_valid_test_data_iterators(neox_args):
             # split dataset into train, valid and test from data_path
             train_ds, valid_ds, test_ds = build_varmisuse_datasets(neox_args)
 
-        # Build dataloders.
-        train_dataloader = make_data_loader_with_padding(train_ds, neox_args=neox_args)
-        valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args=neox_args)
-        test_dataloader = make_data_loader_with_padding(test_ds, neox_args=neox_args)
+        length_bins = [2048, 2000, 512, 128, 64, 0]
+        # Build dataloaders.
+        train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins)
+        valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins)
+        test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins)
 
         # Flags to know if we need to do training/validation/testing.
         do_train = train_dataloader is not None and neox_args.train_iters > 0
@@ -157,36 +161,6 @@ def build_train_valid_test_data_iterators(neox_args):
     return train_data_iterator, valid_data_iterator, test_data_iterator
 
 
-def broadcast_data_list(keys, data):
-    """Broadcast data from rank zero of each model parallel group to the
-        members of the same model parallel group.
-
-        Arguments:
-            keys: list of keys in the data dictionary to be broadcasted
-            data: data dictionary of string keys and cpu tensor values.
-        """
-    # Pack on rank zero.
-    if mpu.get_model_parallel_rank() == 0:
-        data_list = []
-        # Convert dict to list
-        for k in keys:
-            if isinstance(data[k], list):
-                data[k] = [d.cuda() for d in data[k]]
-            else:
-                data[k] = data[k].cuda()
-            data_list.append(data[k])
-    else:
-        data_list = [None] * len(keys)
-
-    # Broadcast
-    torch.distributed.broadcast_object_list(data_list,
-                                            mpu.get_model_parallel_src_rank(),
-                                            group=mpu.get_model_parallel_group())
-
-    output = {k: data for k, data in zip(keys, data_list)}
-    return output
-
-
 def _get_batch(neox_args, tokenizer, keys, data):
     """Support function for get_batch / get_batch pipe (to avoid code repetition)"""
     data_b = broadcast_data_list(keys, data)
@@ -194,23 +168,50 @@ def _get_batch(neox_args, tokenizer, keys, data):
     # Unpack.
     tokens = data_b["input_ids"].long().contiguous()
 
-    # import pdb; pdb.set_trace()
-    # VAV: Create the label masks here?
     nbatch, seq_length = tokens.shape
-    # Create sequence length mask. Mask values of 1 are kept. Default 0.
-    mask = torch.zeros((nbatch, seq_length), dtype=torch.long)  #, device=tokens.device)
-    for b in range(nbatch):
-        mask[b, data_b["repair_candidates"][b]] = 1.
-    target_mask = torch.vstack(
-        [torch.nn.functional.one_hot(rlab, num_classes=seq_length).sum(dim=0) for ii, rlab in
-         enumerate(data_b["repair_targets"])]
-    )  #.to(tokens.device)
+    # Create masks for loss function. Mask values of 1 are kept. Default 0.
 
-    # (error_locations, target_mask), (mask, has_bug)
-    # labels = ((data_b["error_location"], data_b["repair_targets"]),
-    #           (data_b["lengths"], data_b["has_bug"], data_b["repair_candidates"]))
+    # Create mask for the repair candidates
+    mask = torch.zeros((nbatch, seq_length), dtype=torch.long)
+    rcand = data_b["repair_candidates"]
+    if len(data_b["repair_candidates"]) != nbatch:
+        assert len(rcand) == 1, f"Not sure how to handle batch! Repair candidates: {data_b['repair_candidates']}"
+        assert data_b["repair_candidates"][0].shape[0] == nbatch,\
+            f"Repair candidates are unexpected shape {[x.shape for x in data_b['repair_candidates']]} for batch size {nbatch}"
+        # Catch the rare case where all of these are the same length
+        rcand = torch.split(data_b["repair_candidates"][0], 1)
+        rcand = [r.squeeze() for r in rcand]
+    try:
+        for b in range(nbatch):
+            mask[b, rcand[b]] = 1.
+    except Exception as e:
+        print(e)
+        print(f'maximum index value is {rcand[b].max()}')
+        import pdb; pdb.set_trace()
+
+    # Create mask for the repair targets
+    if data_b["error_location"].sum() == 0:
+        target_mask = torch.zeros((nbatch, seq_length), device=tokens.device)
+    else:
+        rtarg = data_b["repair_targets"]
+        if len(data_b["repair_targets"]) != nbatch:
+            assert len(rtarg) == 1, f"Not sure how to handle batch! Repair targets: {data_b['repair_targets']}"
+            # Catch the rare case where all of these are the same length
+            rtarg = torch.split(data_b["repair_targets"][0], 1)
+            rtarg = [r.squeeze() for r in rtarg]
+        target_mask = []
+        for rlab in rtarg:
+            if torch.numel(rlab) == 0:
+                target_mask.append(torch.zeros(seq_length, device=tokens.device))
+            elif torch.numel(rlab) == 1:
+                target_mask.append(torch.nn.functional.one_hot(rlab, num_classes=seq_length))
+            else:
+                target_mask.append(torch.nn.functional.one_hot(rlab, num_classes=seq_length).sum(dim=0))
+        target_mask = torch.vstack(target_mask)
+        assert target_mask.shape == (nbatch, seq_length), f"target mask has unexpected dimensions {target_mask.shape}!"
+
+    # (error_locations, target_mask, mask, has_bug)
     labels = (data_b["error_location"], target_mask, mask, data_b["has_bug"])
-
     # Get the masks and position ids.
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
         tokens, tokenizer.eod, neox_args.eod_mask_loss
@@ -223,7 +224,6 @@ def get_batch(neox_args, data_iterator):
     """Generate a batch"""
 
     # Items and their type.
-    # keys = ['input_ids', 'error_location', 'repair_targets', 'repair_candidates', 'has_bug']  #, 'lengths']
     keys = ['input_ids', 'error_location', 'repair_targets', 'repair_candidates', 'has_bug']
 
     # Broadcast data.
@@ -241,17 +241,16 @@ def get_batch(neox_args, data_iterator):
 
 def get_batch_pipe(data, neox_args):
     """A modification of get_batch() to work with the latest batch instead of an iterator. """
-    raise NotImplementedError
-    # # Items and their type.
-    # keys = ["text"]
-    # datatype = torch.int64
-    #
-    # tokens, labels, loss_mask, attention_mask, position_ids = _get_batch(
-    #     neox_args, neox_args.tokenizer, keys, data, datatype
-    # )
-    # # unpack data
-    # return (tokens, position_ids, attention_mask), (labels, loss_mask)
+    # Items and their type.
+    keys = ['input_ids', 'error_location', 'repair_targets', 'repair_candidates', 'has_bug']
 
+    tokens, labels, _, attention_mask, position_ids = _get_batch(
+        neox_args, neox_args.tokenizer, keys, data
+    )
+    # VAV: need to return data in this order to be compatible with deepspeed pipelining code
+    # unpack data
+    return (tokens, position_ids, attention_mask), labels
+    # return tokens, labels, loss_mask, attention_mask, position_ids
 
 
 ############# DO NOT USE ##############
@@ -412,7 +411,7 @@ def get_batch_pipe(data, neox_args):
 #             assert sizes.dtype == np.int32
 #             # sample_idx = helpers.build_sample_idx(sizes, doc_idx, seq_length,
 #             #                                       num_epochs, tokens_per_epoch)
-#             # TODO: fix _build_sample_idx. Currently it is doing the chunking into seq_length pieces,
+#             # oldTODO: fix _build_sample_idx. Currently it is doing the chunking into seq_length pieces,
 #             #   but if we have variable length vectors this won't work...
 #             sample_idx = _build_sample_idx(sizes, doc_idx, seq_length,
 #                                           num_epochs, tokens_per_epoch)

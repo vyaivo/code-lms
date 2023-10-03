@@ -110,10 +110,12 @@ def varmisuse_multi_class(neox_args, num_classes):
         #     return Dataset(name, [datapath], tokenizer, args.seq_length)
         # return accuracy_func_provider(single_dataset_provider)
 
+    from data_varmisuse import get_batch
+
     """Finetune/evaluate."""
     finetune(neox_args, partial(model_optim_lr_setup, num_classes=num_classes),
              build_train_valid_test_data_iterators,
-             compute_varmisuse_loss, evaluate)  # evaluate_varmisuse)
+             compute_varmisuse_loss, evaluate, custom_batch_fn=get_batch)
 
 
 def compute_varmisuse_loss(logits, label_data, metric=False):

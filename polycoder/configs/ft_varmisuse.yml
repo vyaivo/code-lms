@@ -7,7 +7,7 @@
   "save": "checkpoints/varmisuse/test",
   "load": "checkpoints/checkpoints-160M/",
   "finetune": True,
-  "split": "109,11,58",
+  "split": "100,0,0",
   
   "checkpoint_validation_with_forward_pass": False,
 

@@ -1,7 +1,6 @@
 {
-   #"/home/vyvo/data/var-misuse/great/lm_processed/hf/",
   "finetune-data-path": "lm_data/hf/",
-  "data-keys-collate": ["error_location", "has_bug"],
+  "data-keys-collate": ["has_bug"],
   "tokenizer-type": "GPT2BPETokenizer",
   "vocab-file": "data/gpt2-vocab.json",
   "merge-file": "data/gpt2-merges.txt",

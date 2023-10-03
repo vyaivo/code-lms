@@ -27,25 +27,10 @@ from megatron.utils import (
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 
-from varmisuse.data_varmisuse import get_batch as get_batch_fn
-
-
 def finetune_forward_step(data_iterator, model, neox_args, timers, compute_loss_fn,
-                          return_logits=False, compute_metric=False, training=False):
+                          return_logits=False, compute_metric=False, get_batch_fn=None):
     """Forward step."""
-    if neox_args.is_pipe_parallel:  # and compute_metric:
-        # seq_model = model.module.to_sequential().to(torch.float32)
-        # if not training:
-        #     seq_model.eval()
-        # VAV: right now this doesn't return metrics, just the loss.
-        # if metric_fn:
-        #     outputs = model.eval_batch(data_iterator, return_logits=True)
-        #     loss, logits = outputs
-        #     metric_info = metric_fn(logits)
-        # else:
-        #     outputs = model.eval_batch(data_iterator, return_logits=return_logits)
-        #     return outputs
-    # elif neox_args.is_pipe_parallel:
+    if neox_args.is_pipe_parallel:
         return model.eval_batch(data_iterator, return_logits=return_logits)
 
     # Get the batch.
@@ -54,23 +39,11 @@ def finetune_forward_step(data_iterator, model, neox_args, timers, compute_loss_
     tokens, labels, loss_mask, attention_mask, position_ids = get_batch_fn(
         neox_args=neox_args, data_iterator=data_iterator
     )
-    # import pdb; pdb.set_trace()
-    # if neox_args.fp16['fp16'] and neox_args.is_pipe_parallel and compute_metric:
-    #     tokens = tokens.to(model.local_rank, dtype=torch.half)
+
     if timers is not None:
         timers("batch generator").stop()
 
-    # if neox_args.is_pipe_parallel and compute_metric:
-    #     output = seq_model((tokens, position_ids, attention_mask), skip_activation_checkpoints=True)
-    # else:
     output = model((tokens, position_ids, attention_mask))
-    # if not output.requires_grad:
-    #     for i, p in enumerate(model.parameters()):
-    #         if not p.requires_grad:
-    #             print(i, p.shape)
-    #         else:
-    #             print(i)
-    # import pdb; pdb.set_trace()
 
     # VAV: changed order of loss function inputs to be compatible with deepspeed pipelining defaults
     if compute_metric:
@@ -123,8 +96,7 @@ def evaluate_and_print_results(
     print_rank_0("-" * length)
 
 
-def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_scheduler, loss_function):
-    # TODO: use custom batching
+def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_scheduler, loss_function, custom_batch_fn):
     from megatron.training import backward_step
     """Single training step."""
 
@@ -143,7 +115,8 @@ def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_schedul
                 timers=timers,
                 data_iterator=data_iterator,
                 model=model,
-                compute_loss_fn=loss_function
+                compute_loss_fn=loss_function,
+                get_batch_fn=custom_batch_fn,
             )
             timers("forward").stop()
 
@@ -194,11 +167,11 @@ def finetune_loop(
     train_data_iterator,
     valid_data_iterator,
     loss_function,
-    eval_function
+    eval_function,
+    custom_batch_fn
 ):
     """Train the model function. Simply modified from megatron.training to use a custom loss
-    function and custom batching function"""
-    # TODO: use custom batching
+    function, custom batching function"""
 
     # Turn on training mode which enables dropout.
     model.train()
@@ -217,7 +190,7 @@ def finetune_loop(
 
     # eval function
     eval_forward = partial(finetune_forward_step, compute_loss_fn=loss_function,
-                           return_logits=False, compute_metric=False, training=False)
+                           return_logits=False, compute_metric=False, get_batch_fn=custom_batch_fn)
 
     # VAV DEBUG profiling
     # def trace_handler(p):
@@ -241,7 +214,8 @@ def finetune_loop(
             model=model,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
-            loss_function=loss_function
+            loss_function=loss_function,
+            custom_batch_fn=custom_batch_fn,
         )
         iteration += 1
 
@@ -265,7 +239,7 @@ def finetune_loop(
             learning_rate=lr,
             iteration=iteration,
             loss_scale=optimizer.cur_scale if neox_args.precision == "fp16" else None,
-            report_memory_flag=True, #report_memory_flag,
+            report_memory_flag=report_memory_flag,
             skipped_iter=skipped_iter,
             model=model,
             optimizer=optimizer,
@@ -326,7 +300,7 @@ def finetune_loop(
     return iteration
 
 
-def finetune(neox_args, model_setup_function, build_data_iters_function, loss_function, eval_function):
+def finetune(neox_args, model_setup_function, build_data_iters_function, loss_function, eval_function, custom_batch_fn):
     """Main finetuning program.
     Based off of training.py/pretrain, but allowing the use of custom functions for:
         - data iteration
@@ -363,6 +337,10 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
     ) = build_data_iters_function(neox_args=neox_args)
     timers("train/valid/test data iterators").stop()
 
+    # eval function
+    eval_forward = partial(finetune_forward_step, compute_loss_fn=loss_function,
+                           return_logits=False, compute_metric=False, get_batch_fn=custom_batch_fn)
+
     # Print setup timing.
     print_rank_0("done with setups ...")
     timers.log(["model and optimizer", "train/valid/test data iterators"])
@@ -379,7 +357,8 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             train_data_iterator=train_data_iterator,
             valid_data_iterator=valid_data_iterator,
             loss_function=loss_function,
-            eval_function=eval_function
+            eval_function=eval_function,
+            custom_batch_fn=custom_batch_fn
         )
 
     if neox_args.do_valid:
@@ -388,7 +367,7 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             neox_args=neox_args,
             eval_function=eval_function,
             prefix=prefix,
-            forward_step_func=finetune_step,
+            forward_step_func=eval_forward,
             data_iterator=valid_data_iterator,
             model=model,
             verbose=False,
@@ -411,7 +390,7 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             neox_args=neox_args,
             eval_function=eval_function,
             prefix=prefix,
-            forward_step_func=finetune_step,
+            forward_step_func=eval_forward,
             data_iterator=test_data_iterator,
             model=model,
             verbose=True,

@@ -61,10 +61,10 @@ def collate_fn_pad(batch, data_keys_to_collate=[], report_lengths=False):
         out_dict = {}
         for key in elem:
             item_list = [d[key] for d in batch]
+            item_list = unwrap_lists(item_list)
             # Custom behavior: pad this baby!
             if key in ['text', 'input_ids', 'attention_mask']:
                 # Handle nested list[list[Tensor]]
-                item_list = unwrap_lists(item_list)
                 padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
                 out_dict.update({key: padded_item})
                 if report_lengths:
@@ -74,6 +74,7 @@ def collate_fn_pad(batch, data_keys_to_collate=[], report_lengths=False):
                 # Default collate behavior for a dictionary, according to pytorch 2.0.0
                 out_dict.update({key: default_collate(item_list)})
             else:
+                # print(f'VAV DEBUG custom list of lists: {key, item_list}')
                 # Custom behavior for fields that are lists of lists
                 out_dict.update({key: item_list})
         return elem_type(out_dict)
@@ -84,7 +85,10 @@ def collate_fn_pad(batch, data_keys_to_collate=[], report_lengths=False):
 class SeqLengthSampler(torch.utils.data.Sampler):
     def __init__(self, data_source, batch_size, bucket_boundaries):
         super().__init__(data_source)
-        self.ind_n_len = data_source['length'].numpy()
+        if isinstance(data_source['length'], torch.Tensor):
+            self.ind_n_len = data_source['length'].numpy()
+        else:
+            self.ind_n_len = np.array(data_source['length'])
         self.bucket_boundaries = bucket_boundaries
         bin_inds = np.digitize(self.ind_n_len, self.bucket_boundaries)
         outside_bins = np.sum(bin_inds == 0)

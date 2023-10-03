@@ -170,8 +170,16 @@ def finetune_loop(
     eval_function,
     custom_batch_fn
 ):
-    """Train the model function. Simply modified from megatron.training to use a custom loss
-    function, custom batching function"""
+    """Finetune the model function. Modified from megatron.training to use a custom loss
+    function, custom batching function.
+
+    loss_function: a function which accepts (logits, labels) and returns the loss
+    eval_function: currently unused, but should output metrics as well when implemented.
+    custom_batch_fn: the custom batch function needed for the evaluation. note this assumes that
+                     the training custom batch function is already set by a separate call,
+                     perhaps when creating the data iterators -- e.g.:
+                     model._megatron_batch_fn = partial(get_batch_pipe, neox_args=neox_args)
+    """
 
     # Turn on training mode which enables dropout.
     model.train()

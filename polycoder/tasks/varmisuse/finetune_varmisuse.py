@@ -30,9 +30,6 @@ from sklearn.metrics import accuracy_score
 # TODO: Run Docker test E2E
 
 
-# TODO: figure out why we get an OOM error?!?! seems like it's during validation?
-
-
 def varmisuse_multi_class(neox_args, num_classes):
 
     def model_optim_lr_setup(neox_args, num_classes,
@@ -129,7 +126,7 @@ def compute_varmisuse_loss(logits, label_data, metric=False):
     nbatch, seq_length, _ = logits.shape
 
     # VAV: deepspeed code automatically moves the label data onto the correct device
-    label_data = [l.to(logits.device) for l in label_data]
+    # label_data = [l.to(logits.device) for l in label_data]
     error_locations, target_mask, mask, has_bug = label_data
     # error_locations = error_locations.squeeze()
     n_buggy = torch.sum(has_bug).item()
@@ -137,8 +134,10 @@ def compute_varmisuse_loss(logits, label_data, metric=False):
 
     # Localization loss is simply calculated with sparse CE
     loc_pred = logits[:, :, 0]  # * mask  # (nbatch, seq_length)
-    loc_loss = torch.nn.functional.cross_entropy(loc_pred, error_locations)
+    # loc_loss = torch.nn.functional.cross_entropy(loc_pred, error_locations)
+    loc_loss = torch.nn.functional.binary_cross_entropy_with_logits(loc_pred, error_locations.type(loc_pred.dtype))
     if metric:
+        # TODO: fix this for multi-token targets
         loc_max = loc_pred.detach().clone().softmax(dim=-1).argmax(dim=-1)
         loc_acc_nobug = accuracy_score(y_pred=loc_max[~has_bug],
                                        y_true=error_locations[~has_bug])

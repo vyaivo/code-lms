@@ -2,9 +2,11 @@
 
 """Finetune utilities."""
 
+from collections.abc import Iterator
 import gc
 # from torch.profiler import profile, record_function, ProfilerActivity
 
+from itertools import cycle
 from functools import partial
 import math
 import os, sys
@@ -36,7 +38,7 @@ def finetune_forward_step(data_iterator, model, neox_args, timers, compute_loss_
     # Get the batch.
     if timers is not None:
         timers("batch generator").start()
-    tokens, labels, loss_mask, attention_mask, position_ids = get_batch_fn(
+    tokens, (labels, loss_mask), attention_mask, position_ids = get_batch_fn(
         neox_args=neox_args, data_iterator=data_iterator
     )
 
@@ -53,7 +55,7 @@ def finetune_forward_step(data_iterator, model, neox_args, timers, compute_loss_
         else:
             return loss, metric_info
     else:
-        loss = compute_loss_fn(output, labels, metric=False)
+        loss = compute_loss_fn(output, labels)
         if return_logits:
             return loss, output
         else:
@@ -168,7 +170,9 @@ def finetune_loop(
     valid_data_iterator,
     loss_function,
     eval_function,
-    custom_batch_fn
+    eval_batch_fn,
+    train_loader,
+    val_loader
 ):
     """Finetune the model function. Modified from megatron.training to use a custom loss
     function, custom batching function.
@@ -198,7 +202,7 @@ def finetune_loop(
 
     # eval function
     eval_forward = partial(finetune_forward_step, compute_loss_fn=loss_function,
-                           return_logits=False, compute_metric=False, get_batch_fn=custom_batch_fn)
+                           return_logits=False, compute_metric=False, get_batch_fn=eval_batch_fn)
 
     # VAV DEBUG profiling
     # def trace_handler(p):
@@ -223,9 +227,12 @@ def finetune_loop(
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             loss_function=loss_function,
-            custom_batch_fn=custom_batch_fn,
+            custom_batch_fn=eval_batch_fn,
         )
         iteration += 1
+        if iteration >= len(train_data_iterator):
+            print_rank_0("Starting new epoch. Refreshing training data iterator...")
+            train_data_iterator = iter(train_loader)
 
         overflow_monitor.check(skipped_iter)  # check for repeated overflow
         if neox_args.log_gradient_noise_scale:  # log noise scale if applicable
@@ -277,18 +284,24 @@ def finetune_loop(
             and iteration % neox_args.eval_interval == 0
             and neox_args.do_valid
         ):
+            # val_iter = ((iteration % neox_args.eval_interval) + 1) * neox_args.eval_iters
+            # print(f'VAV DEBUG: val iter {val_iter} for iter {len(valid_data_iterator)}')
+            # if val_iter >= len(valid_data_iterator):
+            #     print_rank_0("Refreshing validation data iterator...")
+            #     valid_data_iterator = iter(val_loader)
             prefix = "iteration {}".format(iteration)
-            with torch.profiler.record_function("EVALUATE LOOP"):
-                evaluate_and_print_results(
-                    neox_args=neox_args,
-                    eval_function=eval_function,
-                    prefix=prefix,
-                    forward_step_func=eval_forward,
-                    data_iterator=valid_data_iterator,
-                    model=model,
-                    verbose=False,
-                    timers=timers
-                )
+            # # with torch.profiler.record_function("EVALUATE LOOP"):
+            # try:
+            evaluate_and_print_results(
+                neox_args=neox_args,
+                eval_function=eval_function,
+                prefix=prefix,
+                forward_step_func=eval_forward,
+                data_iterator=valid_data_iterator,
+                model=model,
+                verbose=False,
+                timers=timers
+            )
             # print(prof.key_averages().table)
             # print(prof)
             # import pdb; pdb.set_trace()
@@ -308,11 +321,14 @@ def finetune_loop(
     return iteration
 
 
-def finetune(neox_args, model_setup_function, build_data_iters_function, loss_function, eval_function, custom_batch_fn):
+def finetune(neox_args, model_setup_function, build_data_function,
+             loss_function, eval_function, custom_batch_fn):
     """Main finetuning program.
     Based off of training.py/pretrain, but allowing the use of custom functions for:
         - data iteration
-        - batching (TODO)
+        - batching
+        - loss function
+        - model, optimizer, lr scheduler
     """
     from megatron.utils import (
         Timers,
@@ -338,11 +354,19 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
 
     # Data stuff.
     timers("train/valid/test data iterators").start()
-    (
-        train_data_iterator,
-        valid_data_iterator,
-        test_data_iterator,
-    ) = build_data_iters_function(neox_args=neox_args)
+    data_output = build_data_function(neox_args=neox_args)
+    if isinstance(data_output[0], Iterator):
+        train_data_iterator, valid_data_iterator, test_data_iterator = data_output
+        assert len(train_data_iterator) <= neox_args.train_iters, \
+            f"You want {neox_args.train_iters} train iterations, which exceeds the length of your iterator. Please change the data setup function to output dataloaders instead."
+        train_dataloader, valid_dataloader = None, None
+    elif isinstance(data_output[0], torch.utils.data.DataLoader):
+        data_iters = [iter(d) if i == 0 else cycle(iter(d)) for i, d in enumerate(data_output)]
+        train_data_iterator, valid_data_iterator, test_data_iterator = data_iters
+        if True:  #len(train_data_iterator) > neox_args.train_iters:
+            train_dataloader, valid_dataloader = data_output[0], data_output[1]
+    else:
+        raise ValueError("The custom data setup function did not produce the expected output")
     timers("train/valid/test data iterators").stop()
 
     # eval function
@@ -366,8 +390,11 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             valid_data_iterator=valid_data_iterator,
             loss_function=loss_function,
             eval_function=eval_function,
-            custom_batch_fn=custom_batch_fn
+            eval_batch_fn=custom_batch_fn,
+            train_loader=train_dataloader,
+            val_loader=valid_dataloader
         )
+
 
     if neox_args.do_valid:
         prefix = "the end of training for val data"
@@ -404,4 +431,3 @@ def finetune(neox_args, model_setup_function, build_data_iters_function, loss_fu
             verbose=True,
             timers=timers,
         )
-

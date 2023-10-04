@@ -81,6 +81,6 @@
    # logging
    "log-interval": 100,
    "steps_per_print": 10,
-   "keep-last-n-checkpoints": 8,
+   "keep-last-n-checkpoints": 5,
    "wall_clock_breakdown": true,
 }

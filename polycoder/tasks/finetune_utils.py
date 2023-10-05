@@ -125,17 +125,17 @@ def finetune_step(neox_args, timers, data_iterator, model, optimizer, lr_schedul
             losses.append(loss)
             # Calculate gradients, reduce across processes, and clip.
             timers("backward").start()
-            try:
-                backward_step(
-                    neox_args=neox_args,
-                    timers=timers,
-                    optimizer=optimizer,
-                    model=model,
-                    loss=loss,
-                )
-            except Exception as e:
-                print(e)
-                import pdb; pdb.set_trace()
+            # try:
+            backward_step(
+                neox_args=neox_args,
+                timers=timers,
+                optimizer=optimizer,
+                model=model,
+                loss=loss,
+            )
+            # except Exception as e:
+            #     print(e)
+            #     import pdb; pdb.set_trace()
             timers("backward").stop()
 
             # Update parameters.
@@ -360,8 +360,9 @@ def finetune(neox_args, model_setup_function, build_data_function,
     data_output = build_data_function(neox_args=neox_args)
     if isinstance(data_output[0], Iterator):
         train_data_iterator, valid_data_iterator, test_data_iterator = data_output
-        assert len(train_data_iterator) <= neox_args.train_iters, \
-            f"You want {neox_args.train_iters} train iterations, which exceeds the length of your iterator. Please change the data setup function to output dataloaders instead."
+        assert neox_args.train_iters <= len(train_data_iterator), \
+            f"You want {neox_args.train_iters} train iterations, which exceeds the length of your iterator " \
+            f"{len(train_data_iterator)}. Please change the data setup function to output dataloaders instead."
         train_dataloader, valid_dataloader = None, None
     elif isinstance(data_output[0], torch.utils.data.DataLoader):
         data_iters = [iter(d) if i == 0 else cycle(iter(d)) for i, d in enumerate(data_output)]

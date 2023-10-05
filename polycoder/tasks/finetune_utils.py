@@ -217,6 +217,7 @@ def finetune_loop(
     #              on_trace_ready=trace_handler) as prof:   # VAV DEBUG profiling
 
     # to monitor if we've skipped many iterations in a row and trigger an early exit
+    refresh_count = 0
     overflow_monitor = OverflowMonitor(optimizer)
     while iteration < neox_args.train_iters:
         loss_dict, skipped_iter = finetune_step(
@@ -230,9 +231,11 @@ def finetune_loop(
             custom_batch_fn=eval_batch_fn,
         )
         iteration += 1
-        if iteration >= len(train_data_iterator):
+        refresh_count += 1
+        if refresh_count >= (len(train_data_iterator) // neox_args.train_batch_size) - 1:
             print_rank_0("Starting new epoch. Refreshing training data iterator...")
             train_data_iterator = iter(train_loader)
+            refresh_count = 0
 
         overflow_monitor.check(skipped_iter)  # check for repeated overflow
         if neox_args.log_gradient_noise_scale:  # log noise scale if applicable
@@ -365,6 +368,7 @@ def finetune(neox_args, model_setup_function, build_data_function,
         train_data_iterator, valid_data_iterator, test_data_iterator = data_iters
         if True:  #len(train_data_iterator) > neox_args.train_iters:
             train_dataloader, valid_dataloader = data_output[0], data_output[1]
+#        print_rank_0(f"VAV DEBUG: {len(train_data_iterator)} data iteration length")
     else:
         raise ValueError("The custom data setup function did not produce the expected output")
     timers("train/valid/test data iterators").stop()

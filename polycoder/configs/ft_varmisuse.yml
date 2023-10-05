@@ -1,0 +1,17 @@
+{
+  "finetune-data-path": "/lm_data/hf/",
+  "data-keys-collate": ["has_bug"],
+  "tokenizer-type": "GPT2BPETokenizer",
+  "vocab-file": "data/gpt2-vocab.json",
+  "merge-file": "data/gpt2-merges.txt",
+  "save": "checkpoints/downstream_tasks/varmisuse/lr6e-4_b4_s10k",
+  "load": "checkpoints/checkpoints-160M/",
+  "finetune": True,
+  "split": "100,0,0",
+  
+  "checkpoint_validation_with_forward_pass": False,
+
+  "tensorboard-dir": "tensorboard",
+  "log-dir": "logs",
+  "use_wandb": False,
+}

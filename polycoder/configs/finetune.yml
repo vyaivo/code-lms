@@ -58,7 +58,7 @@
    "attention-dropout": 0.0,
 
    # precision settings
-   "fp16": { 
+   "fp16": {
      "fp16": true,
      "enabled": true,
      "loss_scale": 0,
@@ -69,18 +69,18 @@
    },
 
    # misc. training settings
-   "train-iters": 160000,
-   "lr-decay-iters": 160000,
+   "train-iters": 10000,
+   "lr-decay-iters": 10000,
    "distributed-backend": "nccl",
    "lr-decay-style": "cosine",
    "warmup": 0.01,
    "save-interval": 1000,
-   "eval-interval": 1000,
-   "eval-iters": 10,
+   "eval-interval": 500,
+   "eval-iters": 100,
 
    # logging
    "log-interval": 100,
    "steps_per_print": 10,
-   "keep-last-n-checkpoints": 1,
+   "keep-last-n-checkpoints": 5,
    "wall_clock_breakdown": true,
 }

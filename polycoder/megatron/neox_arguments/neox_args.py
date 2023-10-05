@@ -1,5 +1,5 @@
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     from .template import NeoXArgsTemplate
@@ -963,4 +963,24 @@ class NeoXArgsTextgen(NeoXArgsTemplate):
     Tasks to evaluate on using lm_eval_harness
     """
 
-    
+
+@dataclass
+class NeoXArgsFinetuning(NeoXArgsTemplate):
+    """
+    Finetuning arguments that SUPPLEMENT training arguments
+    """
+
+    finetune_data_path: str = None
+    """
+    Path to data for finetuning.
+    """
+
+    data_keys_collate: list = field(default_factory=list)
+    """
+    A list of data keys to collate in a Tensor without padding.
+    """
+
+    pad_data_keys: list = field(default_factory=list)
+    """
+    A list of data keys to collate in a Tensor without padding.
+    """

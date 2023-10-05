@@ -22,7 +22,8 @@ from tasks.finetune_utils import finetune
 # from tasks.eval_utils import accuracy_func_provider
 # from megatron.arguments import core_transformer_config_from_args
 
-from data_varmisuse import build_train_valid_test_data_iterators, get_batch_pipe
+from tasks.data_utils import build_data_iterators, get_batch, get_batch_pipe
+from data_varmisuse import get_varmisuse_datasets, get_varmisuse_batch
 
 from sklearn.metrics import accuracy_score
 
@@ -31,6 +32,9 @@ from sklearn.metrics import accuracy_score
 
 
 def varmisuse_multi_class(neox_args, num_classes):
+
+    data_keys = ['input_ids', 'error_inds', 'repair_targets', 'repair_candidates', 'has_bug']
+    pipe_batch_fn = partial(get_batch_pipe, keys=data_keys, custom_batch_fn=get_varmisuse_batch, neox_args=neox_args)
 
     def model_optim_lr_setup(neox_args, num_classes,
                              inference=False, get_key_value=None):
@@ -82,7 +86,7 @@ def varmisuse_multi_class(neox_args, num_classes):
             #        raise ValueError("Stopping here so we can check!")  ## VAV DEBUG
             if neox_args.is_pipe_parallel:
                 model.set_has_attention_mask(True)
-                model.set_batch_fn(partial(get_batch_pipe, neox_args=neox_args))
+                model.set_batch_fn(pipe_batch_fn)  #partial(get_batch_pipe, neox_args=neox_args))
         else:
             raise ValueError("Must be using deepspeed to run neox")
 
@@ -110,12 +114,17 @@ def varmisuse_multi_class(neox_args, num_classes):
         #     return Dataset(name, [datapath], tokenizer, args.seq_length)
         # return accuracy_func_provider(single_dataset_provider)
 
-    from data_varmisuse import get_batch
+    # from data_varmisuse import get_batch
+
+
+    data_iter_fn = partial(build_data_iterators, get_dataset_fn=get_varmisuse_datasets,
+                           pad_sequences=True, length_bins=[2048, 2000, 512, 128, 64, 0])
+    eval_batch_fn = partial(get_batch, keys=data_keys, custom_batch_fn=get_varmisuse_batch)
 
     """Finetune/evaluate."""
     finetune(neox_args, partial(model_optim_lr_setup, num_classes=num_classes),
-             build_train_valid_test_data_iterators,
-             compute_varmisuse_loss, evaluate, custom_batch_fn=get_batch)
+             data_iter_fn,
+             compute_varmisuse_loss, evaluate, custom_batch_fn=eval_batch_fn)
 
 
 def compute_varmisuse_loss(logits, label_data, metric=False):

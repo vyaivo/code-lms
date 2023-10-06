@@ -1,5 +1,3 @@
-# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-
 """Finetune utilities."""
 
 from collections.abc import Iterator
@@ -232,10 +230,11 @@ def finetune_loop(
         )
         iteration += 1
         refresh_count += 1
-        if refresh_count >= (len(train_data_iterator) // neox_args.train_batch_size) - 1:
-            print_rank_0("Starting new epoch. Refreshing training data iterator...")
-            train_data_iterator = iter(train_loader)
-            refresh_count = 0
+        if mpu.get_model_parallel_rank() == 0:
+            if refresh_count >= (len(train_data_iterator) // neox_args.train_batch_size) - 1:
+                print_rank_0("Starting new epoch. Refreshing training data iterator...")
+                train_data_iterator = iter(train_loader)
+                refresh_count = 0
 
         overflow_monitor.check(skipped_iter)  # check for repeated overflow
         if neox_args.log_gradient_noise_scale:  # log noise scale if applicable
@@ -358,12 +357,13 @@ def finetune(neox_args, model_setup_function, build_data_function,
     # Data stuff.
     timers("train/valid/test data iterators").start()
     data_output = build_data_function(neox_args=neox_args)
+    train_dataloader, valid_dataloader = None, None
     if isinstance(data_output[0], Iterator):
         train_data_iterator, valid_data_iterator, test_data_iterator = data_output
-        assert neox_args.train_iters <= len(train_data_iterator), \
-            f"You want {neox_args.train_iters} train iterations, which exceeds the length of your iterator " \
-            f"{len(train_data_iterator)}. Please change the data setup function to output dataloaders instead."
-        train_dataloader, valid_dataloader = None, None
+        if mpu.get_model_parallel_rank() == 0:
+            assert neox_args.train_iters <= len(train_data_iterator), \
+                f"You want {neox_args.train_iters} train iterations, which exceeds the length of your iterator " \
+                f"{len(train_data_iterator)}. Please change the data setup function to output dataloaders instead."
     elif isinstance(data_output[0], torch.utils.data.DataLoader):
         data_iters = [iter(d) if i == 0 else cycle(iter(d)) for i, d in enumerate(data_output)]
         train_data_iterator, valid_data_iterator, test_data_iterator = data_iters
@@ -371,7 +371,12 @@ def finetune(neox_args, model_setup_function, build_data_function,
             train_dataloader, valid_dataloader = data_output[0], data_output[1]
 #        print_rank_0(f"VAV DEBUG: {len(train_data_iterator)} data iteration length")
     else:
-        raise ValueError("The custom data setup function did not produce the expected output")
+        if mpu.get_model_parallel_rank() == 0:
+            print(data_output[0])
+            print(type(data_output[0]))
+            raise ValueError("The custom data setup function did not produce the expected output")
+        else:
+            train_data_iterator, valid_data_iterator, test_data_iterator = (None, None, None)
     timers("train/valid/test data iterators").stop()
 
     # eval function

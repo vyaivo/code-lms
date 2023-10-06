@@ -120,7 +120,7 @@ class SeqLengthSampler(torch.utils.data.Sampler):
         return self.data_len
 
 
-def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
+def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop_last=True):
     """Build dataloader given an input dataset. Minor modification of megatron.data.data_utils"""
     from megatron.data.samplers import DistributedBatchSampler
 
@@ -141,7 +141,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
         sampler = SeqLengthSampler(dataset, global_batch_size, seq_length_bins)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
                                                 batch_size=neox_args.batch_size,
-                                                drop_last=True,
+                                                drop_last=drop_last,
                                                 rank=rank,
                                                 world_size=world_size)
     else:
@@ -149,7 +149,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
         sampler = torch.utils.data.SequentialSampler(dataset)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
                                                 batch_size=global_batch_size,
-                                                drop_last=True,
+                                                drop_last=drop_last,
                                                 rank=rank,
                                                 world_size=world_size)
 
@@ -162,7 +162,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
                                        pin_memory=True)
 
 
-def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bins=None):
+def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bins=None, drop_last=True):
     (train_dataloader, valid_dataloader, test_dataloader) = (None, None, None)
 
     print_rank_0('> building train, validation, and test datasets ...')
@@ -194,9 +194,9 @@ def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bin
 
         # Build dataloaders.
         if pad_sequences:
-            train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins)
-            valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins)
-            test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins)
+            train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins, drop_last=drop_last)
+            valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins, drop_last=drop_last)
+            test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins, drop_last=drop_last)
         else:
             train_dataloader = make_data_loader(train_ds, neox_args=neox_args)
             valid_dataloader = make_data_loader(valid_ds, neox_args=neox_args)

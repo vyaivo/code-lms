@@ -130,6 +130,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
     world_size = mpu.get_data_parallel_world_size()
     rank = mpu.get_data_parallel_rank()
     global_batch_size = neox_args.batch_size * world_size
+    print_rank_0(f"VAV DEBUG global batch {global_batch_size}, each device {neox_args.batch_size}")
     num_workers = neox_args.num_workers
 
     collate_fn = partial(collate_fn_pad,
@@ -139,7 +140,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
     if seq_length_bins:
         sampler = SeqLengthSampler(dataset, global_batch_size, seq_length_bins)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
-                                                batch_size=1,
+                                                batch_size=neox_args.batch_size,
                                                 drop_last=True,
                                                 rank=rank,
                                                 world_size=world_size)
@@ -258,7 +259,6 @@ def build_data_iterators(neox_args, get_dataset_fn, pad_sequences, length_bins):
 
 def get_batch(neox_args, data_iterator, keys, custom_batch_fn):
     """Generate a batch, assuming a sequential model."""
-
     # Broadcast data.
     if data_iterator is not None:
         data = next(data_iterator)

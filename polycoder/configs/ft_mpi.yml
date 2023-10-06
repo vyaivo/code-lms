@@ -4,8 +4,8 @@
   "tokenizer-type": "GPT2BPETokenizer",
   "vocab-file": "data/gpt2-vocab.json",
   "merge-file": "data/gpt2-merges.txt",
-  "save": "checkpoints/downstream_tasks/mpi/lr6e-4_b4_s10k",
-  "load": "checkpoints/checkpoints-160M/",
+  "save": "checkpoints/downstream_tasks/mpi/origLarge_lr6e-4_b4_s10k",
+  "load": "checkpoints/checkpoints-2-7B/",
   "finetune": True,
   "split": "100,0,0",
   

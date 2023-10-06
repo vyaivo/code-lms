@@ -55,7 +55,10 @@ def mpi_generation(neox_args):
 
 
 def loss_fn(logits, labels):
-    lm_labels, _ = labels
+    if isinstance(labels, tuple) and len(labels) == 2:
+        lm_labels, _ = labels
+    else:
+        lm_labels = labels
     return torch.nn.functional.cross_entropy(logits.permute((0, 2, 1)), lm_labels, ignore_index=0)
 
 

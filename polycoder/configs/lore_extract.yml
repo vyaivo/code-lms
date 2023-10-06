@@ -1,6 +1,6 @@
 {
   # GPT-style tokenization (BPE)
-  "data-path": "/lore_data/",
+  "data-path": "/lm_data/",
   "vocab-file": "data/gpt2-vocab.json",
   "merge-file": "data/gpt2-merges.txt",
   
@@ -10,8 +10,8 @@
 #  "tokenizer-type": "Tokompiler",
 #  "vocab-file": "megatron/tokenizer/tokompiler/tokenizer_vocab/vocab.txt",
 
-  "do_train": 0,
-  "do_valid": 0,
+  "do_train": 1,
+  "do_valid": 1,
   "do_test": 1,
   "split": "0,0,100",
   "load": "checkpoints/checkpoints-160M/",

@@ -2,49 +2,69 @@
 
 import deepspeed
 from functools import partial
-import math
 import torch
 
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from megatron.neox_arguments import NeoXArgs
 from megatron import mpu, print_rank_0
-from megatron.training import evaluate, get_optimizer, get_learning_rate_scheduler
+from megatron.initialize import initialize_megatron
+from megatron.neox_arguments import NeoXArgs
 from megatron.model import (
     GPT2ModelPipe,
     SoftEmbedding,
 )
-from megatron.utils import get_total_params
-
+from megatron.utils import get_total_params, get_ltor_masks_and_position_ids, Timers
 from megatron.checkpointing import load_checkpoint
-from tasks.finetune_utils import finetune
-from tasks.data_utils import build_data_iterators, get_batch
+
+from tasks.data_utils import build_dataloaders, get_batch
+from tasks.extract_utils import extract_loop
 
 from data_lore_lm import build_lore_dataset
 
 
 def extract_lore_representations(neox_args):
-    
-    output_dir = "/lm_data/extracted/"
+    # Find and load the dataset
+    output_path = "/lm_data/extracted/"
     get_lore_dataset = partial(build_lore_dataset, data_path=neox_args.finetune_data_path,
                                tokenizer=neox_args.tokenizer)
-    data_iterators = build_data_iterators(neox_args, get_dataset_fn=get_lore_dataset,
-                                          pad_sequences=True, length_bins=[2048, 1024, 512, 0])
+    # Initialize GPT-NeoX/Megatron
+    timers = Timers(use_wandb=False, tensorboard_writer=neox_args.tensorboard_writer)
+    initialize_megatron(neox_args=neox_args)
+    # Do the data loader and model setup
+    timers("train/valid/test data iterators").start()
+    data_split_names = ["train", "val", "test"]
+    # TODO: check that drop_last=False actually works
+    data_iterators = build_dataloaders(neox_args, get_dataset_fn=get_lore_dataset,
+                                       pad_sequences=True, length_bins=[2048, 1024, 512, 0],
+                                       drop_last=False)
+    timers("train/valid/test data iterators").stop()
+
+    timers("model setup").start()
     data_keys = ["input_ids", "source"]
     eval_batch_fn = partial(get_batch, keys=data_keys, custom_batch_fn=lore_batch_fn)
     model = setup_model(neox_args)
+    timers("model setup").stop()
 
-    extract_loop(neox_args, timers, model, data_iterator, eval_batch_fn, output_dir)
+    print_rank_0("done with setups ...")
+    timers.log(["model setup", "train/valid/test data iterators"])
+
+    # Extract for each split in the dataset
+    for split, data_iterator in zip(data_split_names, data_iterators):
+        extract_loop(neox_args, timers, model, data_iterator, eval_batch_fn,
+                     output_dir=f'{output_path}/{split}/',
+                     batch_data_key="source")
 
 
-def lore_batch_fn(neox_args, tokenizer, keys, data, datatype=torch.int64):
+def lore_batch_fn(neox_args, keys, data, datatype=torch.int64):
     """Support function for get_batch / get_batch pipe (to avoid code repetition). See tasks/data_utils.py."""
     data_b = mpu.broadcast_data(keys, data, datatype)
 
     # Unpack.
     tokens_ = data_b["input_ids"].long().squeeze()
+    if tokens_.shape[0] < neox_args.batch_size:
+        print(f"VAV DEBUG: this batch is {tokens_.shape[0]}, less than {neox_args.batch_size}")
 
     if tokens_.ndim > 2:
         # this is to debug an intermittent error that we're getting in batching
@@ -124,7 +144,7 @@ def setup_model(neox_args, inference=True, get_key_value=True, iteration=None):
 
     if neox_args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
-        assert optimizer is None
+        optimizer = None
         _model_params = None
         _lr_scheduler = None
 

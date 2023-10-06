@@ -1,9 +1,14 @@
 """Utilities to extract LM representations."""
+import deepspeed
 import numpy as np
 import torch
 
+from math import ceil
 
-def extract_forward_step(data_iterator, model, timers, get_batch_fn, batch_output_key="source"):
+from megatron import print_rank_0
+
+
+def extract_forward_step(neox_args, data_iterator, model, timers, get_batch_fn, batch_output_key="source"):
     """Eval forward step that only outputs logits and token sources, no loss."""
     # Get the batch.
     if timers is not None:
@@ -15,7 +20,9 @@ def extract_forward_step(data_iterator, model, timers, get_batch_fn, batch_outpu
         timers("batch generator").stop()
 
     output = model((tokens, position_ids, attention_mask))
-    return output, tokens['source']
+    out_labels = tokens[batch_output_key] if batch_output_key else None
+
+    return output, out_labels
 
 
 def extract_loop(
@@ -24,14 +31,16 @@ def extract_loop(
     model,
     data_iterator,
     eval_batch_fn,
-    output_dir
+    output_dir,
+    batch_data_key=None,
+    verbose=True
 ):
     """
     Simply run the data through the model and extract the logit representations.
-    TODO: save the input data source as well
 
-    eval_function: currently unused, but should output metrics as well when implemented.
-    custom_batch_fn: the custom batch function needed for the evaluation.
+    eval_batch_fn: custom batching function to use in an evaluation loop
+    output_dir: where to store the output representations
+    batch_data_key: the key in the dataset batch that needs to be stored along with the representations
     """
     assert not neox_args.is_pipe_parallel, "Please turn pipe parallelism off to extract logits"
     batch_size = neox_args.batch_size
@@ -50,21 +59,21 @@ def extract_loop(
                 )
             try:
                 prefix = "iteration {}".format(iteration)
-                # TODO: ensure that data iterator gets all samples (i.e. pad batches)
-                logits, tokens = extract_forward_step(data_iterator, model, timers,
+                logits, tokens = extract_forward_step(neox_args, data_iterator, model, timers,
                                                       eval_batch_fn, batch_data_key)
-            except StopIteration:
-                # Out of data
+            except StopIteration:  # out of data
                 break
             if iteration == 0:
                 import pdb; pdb.set_trace()
                 tensor_shape = [num_samples] + list(logits.shape[1:])
                 output = np.memmap(f"{output_dir}/extracted_tensors.npy", dtype=np.float32,
                                    mode='w', shape=tuple(tensor_shape))
-                path_array = np.array([None]*num_samples, dtype=object) 
+                if batch_data_key:
+                    path_array = np.array([None]*num_samples, dtype=object)
             i, j = iteration * batch_size, (iteration + 1) * batch_size
             output[i:j, :] = logits.to_numpy()
-            path_array[i:j] = tokens
+            if batch_data_key:
+                path_array[i:j] = tokens
             # When contiguous memory optimizations are enabled, the buffers
             # allocated by the optimizations are deallocated during backward pass
             # in the absence of backward pass the buffers should be reset after each
@@ -75,7 +84,8 @@ def extract_loop(
             if (iteration % flush_write_period) == 0:
                 print(f"Flushing data to {output_dir} at {iteration}/{total_iters} iterations...")
                 output.flush()
-    np.savez(f"{output_dir}/source_paths.npz", path_array)
     output.flush()
+    if batch_data_key:
+        np.savez(f"{output_dir}/source_paths.npz", path_array)
     print(f"Finished writing data to {output_dir}!")
-_
+

@@ -21,18 +21,21 @@ from megatron.checkpointing import load_checkpoint
 from tasks.data_utils import build_dataloaders, get_batch
 from tasks.extract_utils import extract_loop
 
+print('VAV DEBUG:', os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data_lore_lm import build_lore_dataset
 
 
 def extract_lore_representations(neox_args):
     # Find and load the dataset
-    output_path = "/lm_data/extracted/"
-    get_lore_dataset = partial(build_lore_dataset, data_path=neox_args.finetune_data_path,
+    output_path = "/lm_data/extracted/small-bpe/"
+    get_lore_dataset = partial(build_lore_dataset, data_path=neox_args.data_path,
                                tokenizer=neox_args.tokenizer)
     # Initialize GPT-NeoX/Megatron
     timers = Timers(use_wandb=False, tensorboard_writer=neox_args.tensorboard_writer)
     initialize_megatron(neox_args=neox_args)
     # Do the data loader and model setup
+    neox_args.iteration = 0
     timers("train/valid/test data iterators").start()
     data_split_names = ["train", "val", "test"]
     # TODO: check that drop_last=False actually works
@@ -131,7 +134,7 @@ def get_model(neox_args, inference=True, get_key_value=True):
         raise ValueError("Must be using deepspeed to run neox")
 
 
-def setup_model(neox_args, inference=True, get_key_value=True, iteration=None):
+def setup_model(neox_args, inference=True, get_key_value=True):
     """Setup model and optimizer."""
     model = get_model(
         neox_args=neox_args, inference=inference, get_key_value=get_key_value
@@ -172,8 +175,7 @@ def setup_model(neox_args, inference=True, get_key_value=True, iteration=None):
             inference=True,
             iteration=None,
         )
-        print_rank_0(
-            f"Loading checkpoint")
+        print_rank_0(f"Loading checkpoint")
     else:
         raise ValueError("Need a checkpoint to load from to extract representations!") 
 

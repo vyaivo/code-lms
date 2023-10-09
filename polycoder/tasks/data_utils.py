@@ -18,10 +18,10 @@ def unwrap_lists(list_data, data_type=torch.Tensor):
         if isinstance(list_data[0], data_type):
             return list_data
         else:
-            return unwrap_lists(list_data[0])
+            return unwrap_lists(list_data[0], data_type)
 
 
-def broadcast_data_list(keys, data):
+def broadcast_data_list(keys, data, is_tensor=True, data_type=torch.Tensor):
     """Broadcast data from rank zero of each model parallel group to the
         members of the same model parallel group.
 
@@ -36,10 +36,12 @@ def broadcast_data_list(keys, data):
         for k in keys:
             if isinstance(data[k], list):
                 # Handle nested lists
-                data[k] = unwrap_lists(data[k])
-                data[k] = [d.squeeze().cuda() for d in data[k]]
+                data[k] = unwrap_lists(data[k], data_type)
+                if is_tensor:
+                    data[k] = [d.squeeze().cuda() for d in data[k]]
             else:
-                data[k] = data[k].squeeze().cuda()
+                if is_tensor:
+                    data[k] = data[k].squeeze().cuda()
             data_list.append(data[k])
     else:
         data_list = [None] * len(keys)
@@ -53,9 +55,10 @@ def broadcast_data_list(keys, data):
     return output
 
 
-def collate_fn_pad(batch, data_keys_to_collate=[], pad_keys=['text', 'input_ids', 'attention_mask'], report_lengths=False):
+def collate_fn_pad(batch, data_keys_to_collate=[],
+                   pad_keys=['text', 'input_ids', 'attention_mask'],
+                   report_lengths=False):
     from torch.utils.data._utils.collate import default_collate
-
     elem = batch[0]
     elem_type = type(elem)
 
@@ -63,9 +66,9 @@ def collate_fn_pad(batch, data_keys_to_collate=[], pad_keys=['text', 'input_ids'
         out_dict = {}
         for key in elem:
             item_list = [d[key] for d in batch]
-            item_list = unwrap_lists(item_list)
             # Custom behavior: pad this baby!
             if key in pad_keys:
+                item_list = unwrap_lists(item_list)
                 # Handle nested list[list[Tensor]]
                 padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
                 out_dict.update({key: padded_item})
@@ -110,6 +113,8 @@ class SeqLengthSampler(torch.utils.data.Sampler):
         iter_list = []
         for k in self.data_buckets.keys():
             np.random.shuffle(self.data_buckets[k])
+            # VAV: the following line of code will NOT yield perfect batches -- some of the leftovers
+            # get grouped into bigger batches!
             iter_list += (np.array_split(self.data_buckets[k],
                                          int(self.data_buckets[k].shape[0] / self.batch_size)))
         # shuffle(iter_list)  # shuffle batches so that they aren't ordered by bucket size
@@ -138,9 +143,13 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop
                          pad_keys=neox_args.pad_data_keys)
 
     if seq_length_bins:
-        sampler = SeqLengthSampler(dataset, global_batch_size, seq_length_bins)
+        s1_batch = global_batch_size
+        s2_batch = neox_args.batch_size if (world_size > 1) else 1
+
+    if seq_length_bins:
+        sampler = SeqLengthSampler(dataset, batch_size=s1_batch, bucket_boundaries=seq_length_bins)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
-                                                batch_size=neox_args.batch_size,
+                                                batch_size=s2_batch,
                                                 drop_last=drop_last,
                                                 rank=rank,
                                                 world_size=world_size)
@@ -156,6 +165,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop
     print_rank_0(f'Dataset has {len(batch_sampler)} samples')
     # Torch dataloader.
     return torch.utils.data.DataLoader(dataset,
+                                       sampler=None,
                                        batch_sampler=batch_sampler,
                                        num_workers=num_workers,
                                        collate_fn=collate_fn,

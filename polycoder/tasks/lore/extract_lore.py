@@ -12,6 +12,7 @@ from megatron import mpu, print_rank_0
 from megatron.initialize import initialize_megatron
 from megatron.neox_arguments import NeoXArgs
 from megatron.model import (
+    GPT2Finetune,
     GPT2ModelPipe,
     SoftEmbedding,
 )
@@ -38,10 +39,16 @@ def extract_lore_representations(neox_args):
     neox_args.iteration = 0
     timers("train/valid/test data iterators").start()
     data_split_names = ["train", "val", "test"]
-    # TODO: check that drop_last=False actually works
+    seq_length_bins = [2048, 1024, 768, 512, 0]
     data_loaders = build_dataloaders(neox_args, get_dataset_fn=get_lore_dataset,
-                                     pad_sequences=True, length_bins=[2048, 1024, 512, 0],
+                                     pad_sequences=True, length_bins=seq_length_bins,
                                      drop_last=False)
+    # Grab n samples in each length bin
+    bin_n = [{}, {}, {}]
+    for i, d in enumerate(data_loaders):
+        db_dict = d.batch_sampler.sampler.data_buckets
+        for n in range(len(seq_length_bins) - 1):
+            bin_n[i][seq_length_bins[n]] = len(db_dict[n+1])
     timers("train/valid/test data iterators").stop()
     timers.log(["train/valid/test data iterators"])
 
@@ -56,12 +63,15 @@ def extract_lore_representations(neox_args):
     timers.log(["model setup"])
 
     # Extract for each split in the dataset
-    for split, loader in zip(data_split_names, data_loaders):
+    for i, (split, loader) in enumerate(zip(data_split_names, data_loaders)):
+        if i != 1:
+            print(f'Skipping {split} data for VAV DEBUG purposes')
+            continue
         output_path = os.path.join(output_path, split)
         os.makedirs(output_path, exist_ok=True)
         extract_loop(neox_args, timers, model, iter(loader), eval_batch_fn,
-                     output_dir=output_path,
-                     batch_data_key="source")
+                     output_dir=output_path, batch_data_key="source",
+                     samples_per_split_bin=bin_n[i])
 
 
 def lore_batch_fn(neox_args, keys, data, datatype=torch.int64, tokenizer=None):
@@ -93,7 +103,8 @@ def get_model(neox_args, pipeline_batch_fn=None, inference=True, get_key_value=F
     print_rank_0("building GPT2 model ...")
 
     # Build model on cpu.
-    model = GPT2ModelPipe(
+    # model = GPT2ModelPipe(
+    model = GPT2Finetune(
         neox_args=neox_args,
         num_tokentypes=0,
         parallel_output=True,

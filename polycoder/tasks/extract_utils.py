@@ -38,7 +38,8 @@ def extract_loop(
     output_dir,
     batch_data_key=None,
     max_seq_length=2048,
-    verbose=True
+    verbose=True,
+    samples_per_split_bin=None
 ):
     """
     Simply run the data through the model and extract the logit representations.
@@ -55,34 +56,61 @@ def extract_loop(
     model.eval()
     # Evaluation loop
     iteration = 0
+    i, j = 0, 0
     with torch.no_grad():
         while True:
             if verbose and iteration % neox_args.log_interval == 0:
                 print_rank_0(
-                    "Evaluating iter {}/{}".format(iteration, neox_args.eval_iters)
+                    "Evaluating iter {}/{}".format(iteration, total_iters)
                 )
             try:
                 prefix = "iteration {}".format(iteration)
                 logits, tokens = extract_forward_step(neox_args, data_iterator, model, timers,
                                                       eval_batch_fn, batch_data_key)
+                logits = logits.cpu().numpy()
             except StopIteration:  # out of data
                 break
             if iteration == 0:
-                # TODO: don't waste memory by allocating all to max_seq_length -- bin the samples by length
-                tensor_shape = [num_samples, max_seq_length, logits.shape[-1]]
-                output = np.memmap(f"{output_dir}/extracted_tensors.npy", dtype=np.float32,
-                                   mode='w+', shape=tuple(tensor_shape))
+                print_rank_0("Creating memory mapped tensors...")
+                if samples_per_split_bin:
+                    seq_bins = np.append(np.array(list(samples_per_split_bin.keys())), np.array([0]))
+                    seq_bin_count = list(samples_per_split_bin.values())
+                    output = [None] * len(seq_bin_count)
+                    for b, (seq_max, n_bin_samples) in enumerate(zip(seq_bins[:-1], seq_bin_count)):
+                        tensor_shape = [n_bin_samples, seq_max, logits.shape[-1]]
+                        output[b] = np.memmap(f"{output_dir}/extracted_tensors_{seq_max}.npy", dtype=np.float32,
+                                              mode='w+', shape=tuple(tensor_shape))
+                        print_rank_0(f"Tensor with shape {tensor_shape}")
+                else:
+                    tensor_shape = [num_samples, max_seq_length, logits.shape[-1]]
+                    output = np.memmap(f"{output_dir}/extracted_tensors.npy", dtype=np.float32,
+                                       mode='w+', shape=tuple(tensor_shape))
+                    print_rank_0(f"Tensor with shape {tensor_shape}")
                 if batch_data_key:
-                    path_array = np.array([None]*num_samples, dtype=object)
-            this_batch_size = logits.shape[0]
-            if iteration == 0:
-                i, j = 0, this_batch_size
+                    if samples_per_split_bin:
+                        path_dict = {}
+                        for b, (seq_max, n_bin_samples) in enumerate(zip(seq_bins[:-1], seq_bin_count)):
+                            path_dict[b] = np.array([None]*n_bin_samples, dtype=object)
+                    else:
+                        path_array = np.array([None]*num_samples, dtype=object)
+            this_batch_size, this_seq_length = logits.shape[0:2]
+            if samples_per_split_bin:
+                bin_id = np.digitize(np.array(this_seq_length), seq_bins) - 1
+                i = j
+                j = i + this_batch_size
+                output[bin_id][i:j, :this_seq_length, :] = logits
+                if batch_data_key:
+                    path_dict[bin_id][i:j] = tokens
+                if j == output[bin_id].shape[0]:
+                    print_rank_0("Resetting indices for next memmap tensor...")
+                    i, j = 0, 0
+                print_rank_0(i, j)
             else:
                 i = j
-                j = j + this_batch_size
-            output[i:j, :logits.shape[1]] = logits.cpu().numpy()
-            if batch_data_key:
-                path_array[i:j] = tokens
+                j = i + this_batch_size
+                output[i:j, :this_seq_length, :] = logits
+                if batch_data_key:
+                    path_array[i:j] = tokens
             # When contiguous memory optimizations are enabled, the buffers
             # allocated by the optimizations are deallocated during backward pass
             # in the absence of backward pass the buffers should be reset after each
@@ -92,9 +120,24 @@ def extract_loop(
             iteration += 1
             if (iteration % flush_write_period) == 0:
                 print(f"Flushing data to {output_dir} at {iteration}/{total_iters} iterations...")
-                output.flush()
-    output.flush()
-    if batch_data_key:
-        np.savez(f"{output_dir}/source_paths.npz", path_array)
+                if samples_per_split_bin:
+                    for f_output in output:
+                        f_output.flush()
+                    if batch_data_key:
+                        np.savez(f"{output_dir}/source_paths.npz", path_dict)
+                else:
+                    output.flush()
+                    if batch_data_key:
+                        np.savez(f"{output_dir}/source_paths.npz", path_array)
+    # Save one last time!
+    if samples_per_split_bin:
+        for f_output in output:
+            f_output.flush()
+        if batch_data_key:
+            np.savez(f"{output_dir}/source_paths.npz", path_dict)
+    else:
+        output.flush()
+        if batch_data_key:
+            np.savez(f"{output_dir}/source_paths.npz", path_array)
     print(f"Finished writing data to {output_dir}!")
 

@@ -8,21 +8,25 @@ from math import ceil
 from megatron import print_rank_0
 
 
-def extract_forward_step(neox_args, data_iterator, model, timers, get_batch_fn, batch_output_key="source"):
+def extract_forward_step(neox_args, data_iterator, model, timers,
+                         get_batch_fn, batch_output_key="source"):
     """Eval forward step that only outputs logits and token sources, no loss."""
+    if neox_args.is_pipe_parallel:
+        return model.eval_batch(data_iterator, return_logits=True)
+
     # Get the batch.
     if timers is not None:
         timers("batch generator").start()
-    tokens, _, attention_mask, position_ids = get_batch_fn(
+    tokens, (labels, _), attention_mask, position_ids = get_batch_fn(
         neox_args=neox_args, data_iterator=data_iterator
     )
     if timers is not None:
         timers("batch generator").stop()
 
     output = model((tokens, position_ids, attention_mask))
-    out_labels = tokens[batch_output_key] if batch_output_key else None
+    # out_labels = tokens[batch_output_key] if batch_output_key else None
 
-    return output, out_labels
+    return output, labels
 
 
 def extract_loop(
@@ -33,6 +37,7 @@ def extract_loop(
     eval_batch_fn,
     output_dir,
     batch_data_key=None,
+    max_seq_length=2048,
     verbose=True
 ):
     """
@@ -43,10 +48,9 @@ def extract_loop(
     batch_data_key: the key in the dataset batch that needs to be stored along with the representations
     """
     assert not neox_args.is_pipe_parallel, "Please turn pipe parallelism off to extract logits"
-    batch_size = neox_args.batch_size
     num_samples = len(data_iterator)
     flush_write_period = 100
-    total_iters = int(ceil(num_samples / batch_size))
+    total_iters = int(ceil(num_samples / neox_args.batch_size))
 
     model.eval()
     # Evaluation loop
@@ -64,14 +68,19 @@ def extract_loop(
             except StopIteration:  # out of data
                 break
             if iteration == 0:
-                import pdb; pdb.set_trace()
-                tensor_shape = [num_samples] + list(logits.shape[1:])
+                # TODO: don't waste memory by allocating all to max_seq_length -- bin the samples by length
+                tensor_shape = [num_samples, max_seq_length, logits.shape[-1]]
                 output = np.memmap(f"{output_dir}/extracted_tensors.npy", dtype=np.float32,
-                                   mode='w', shape=tuple(tensor_shape))
+                                   mode='w+', shape=tuple(tensor_shape))
                 if batch_data_key:
                     path_array = np.array([None]*num_samples, dtype=object)
-            i, j = iteration * batch_size, (iteration + 1) * batch_size
-            output[i:j, :] = logits.to_numpy()
+            this_batch_size = logits.shape[0]
+            if iteration == 0:
+                i, j = 0, this_batch_size
+            else:
+                i = j
+                j = j + this_batch_size
+            output[i:j, :logits.shape[1]] = logits.cpu().numpy()
             if batch_data_key:
                 path_array[i:j] = tokens
             # When contiguous memory optimizations are enabled, the buffers

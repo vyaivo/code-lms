@@ -18,7 +18,7 @@ from megatron.model import (
 from megatron.utils import get_total_params, get_ltor_masks_and_position_ids, Timers
 from megatron.checkpointing import load_checkpoint
 
-from tasks.data_utils import build_dataloaders, get_batch
+from tasks.data_utils import build_dataloaders, get_batch, get_batch_pipe, broadcast_data_list
 from tasks.extract_utils import extract_loop
 
 print('VAV DEBUG:', os.path.dirname(os.path.abspath(__file__)))
@@ -39,54 +39,55 @@ def extract_lore_representations(neox_args):
     timers("train/valid/test data iterators").start()
     data_split_names = ["train", "val", "test"]
     # TODO: check that drop_last=False actually works
-    data_iterators = build_dataloaders(neox_args, get_dataset_fn=get_lore_dataset,
-                                       pad_sequences=True, length_bins=[2048, 1024, 512, 0],
-                                       drop_last=False)
+    data_loaders = build_dataloaders(neox_args, get_dataset_fn=get_lore_dataset,
+                                     pad_sequences=True, length_bins=[2048, 1024, 512, 0],
+                                     drop_last=False)
     timers("train/valid/test data iterators").stop()
+    timers.log(["train/valid/test data iterators"])
 
     timers("model setup").start()
     data_keys = ["input_ids", "source"]
     eval_batch_fn = partial(get_batch, keys=data_keys, custom_batch_fn=lore_batch_fn)
+    # eval_batch_fn = partial(get_batch_pipe, keys=data_keys, custom_batch_fn=lore_batch_fn)
     model = setup_model(neox_args)
     timers("model setup").stop()
 
     print_rank_0("done with setups ...")
-    timers.log(["model setup", "train/valid/test data iterators"])
+    timers.log(["model setup"])
 
     # Extract for each split in the dataset
-    for split, data_iterator in zip(data_split_names, data_iterators):
-        extract_loop(neox_args, timers, model, data_iterator, eval_batch_fn,
-                     output_dir=f'{output_path}/{split}/',
+    for split, loader in zip(data_split_names, data_loaders):
+        output_path = os.path.join(output_path, split)
+        os.makedirs(output_path, exist_ok=True)
+        extract_loop(neox_args, timers, model, iter(loader), eval_batch_fn,
+                     output_dir=output_path,
                      batch_data_key="source")
 
 
-def lore_batch_fn(neox_args, keys, data, datatype=torch.int64):
+def lore_batch_fn(neox_args, keys, data, datatype=torch.int64, tokenizer=None):
     """Support function for get_batch / get_batch pipe (to avoid code repetition). See tasks/data_utils.py."""
-    data_b = mpu.broadcast_data(keys, data, datatype)
+    data_b = mpu.broadcast_data(["input_ids"], data, datatype)
+    data_x = broadcast_data_list(["source"], data, is_tensor=False, data_type=str)
 
     # Unpack.
-    tokens_ = data_b["input_ids"].long().squeeze()
-    if tokens_.shape[0] < neox_args.batch_size:
-        print(f"VAV DEBUG: this batch is {tokens_.shape[0]}, less than {neox_args.batch_size}")
+    tokens = data_b["input_ids"].long().squeeze().contiguous()
 
-    if tokens_.ndim > 2:
+    if tokens.ndim > 2:
         # this is to debug an intermittent error that we're getting in batching
         print(data)
-        print(tokens_.shape)
+        print(tokens.shape)
         import pdb; pdb.set_trace()
 
-    labels = tokens_[:, 1:]
-    tokens = tokens_[:, :-1].contiguous()
+    labels = data_x["source"]
     
     # Get the masks and position ids.
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
         tokens, 0, True
     )
-
     return tokens, (labels, loss_mask), attention_mask, position_ids
 
 
-def get_model(neox_args, inference=True, get_key_value=True):
+def get_model(neox_args, pipeline_batch_fn=None, inference=True, get_key_value=False):
     """Build the model."""
 
     print_rank_0("building GPT2 model ...")
@@ -125,7 +126,12 @@ def get_model(neox_args, inference=True, get_key_value=True):
         # Export PipeParallel model to nn.Sequential model to avoid the overhead of deepspeed's pipe parallel training
         model = model.to_sequential()
     else:
-        raise ValueError("Please disable pipe parallelism when extracting representations")
+        # This is a hack to give us a reference to get_batch_pipe from within training.py
+        # We need to call model.set_batch_fn after deepspeed.initialize
+        model._megatron_batch_fn = partial(pipeline_batch_fn, neox_args=neox_args)
+
+    # print('VAV DEBUG: trying to figure out whether I can pass the model batch input as output again')
+    # import pdb; pdb.set_trace()
 
     if neox_args.deepspeed:
         # DeepSpeed handles CUDA, FP16, and DDP components.
@@ -134,7 +140,7 @@ def get_model(neox_args, inference=True, get_key_value=True):
         raise ValueError("Must be using deepspeed to run neox")
 
 
-def setup_model(neox_args, inference=True, get_key_value=True):
+def setup_model(neox_args, inference=True, get_key_value=False):
     """Setup model and optimizer."""
     model = get_model(
         neox_args=neox_args, inference=inference, get_key_value=get_key_value
@@ -163,8 +169,15 @@ def setup_model(neox_args, inference=True, get_key_value=True):
         )
         model.total_params = get_total_params(model.module)
         print_rank_0(f' > total params: {"{:,}".format(model.total_params)}')
+        if neox_args.is_pipe_parallel:
+            model.set_has_attention_mask(True)
+            model.set_batch_fn(model.module._megatron_batch_fn)
     else:
         raise ValueError("Must be using deepspeed to run neox")
+
+    if neox_args.is_pipe_parallel:
+        model.set_has_attention_mask(True)
+        model.set_batch_fn(model.module._megatron_batch_fn)
 
     if neox_args.load is not None:
         _ = load_checkpoint(
@@ -177,7 +190,8 @@ def setup_model(neox_args, inference=True, get_key_value=True):
         )
         print_rank_0(f"Loading checkpoint")
     else:
-        raise ValueError("Need a checkpoint to load from to extract representations!") 
+        pass
+        # raise ValueError("Need a checkpoint to load from to extract representations!")
 
     return model
 

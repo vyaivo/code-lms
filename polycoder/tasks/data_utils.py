@@ -100,6 +100,11 @@ class SeqLengthSampler(torch.utils.data.Sampler):
         self.data_len = len(data_source) - outside_bins
         if outside_bins > 0:
             print(f'Excluding {outside_bins} samples because they fall outside length bins')
+            if outside_bins < 25:
+                print(f'Excluded samples have lengths: {self.ind_n_len[bin_inds == 0]}')
+            else:
+                excluded = self.ind_n_len[bin_inds == 0]
+                print(f'Excluded sample lengths at 5%, 50%, and 95%: {np.percentile(excluded, [5, 50, 95])}')
         uniq_bins = np.unique(bin_inds)
         data_buckets = {}
         for b in uniq_bins:

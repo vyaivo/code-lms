@@ -12,21 +12,37 @@ def extract_forward_step(neox_args, data_iterator, model, timers,
                          get_batch_fn, batch_output_key="source"):
     """Eval forward step that only outputs logits and token sources, no loss."""
     if neox_args.is_pipe_parallel:
-        return model.eval_batch(data_iterator, return_logits=True)
+        return model.inference_extract(data_iterator)  #, return_logits=True)
+    else:
+        raise ValueError("Model is not pipe parallel!")
 
-    # Get the batch.
-    if timers is not None:
-        timers("batch generator").start()
-    tokens, (labels, _), attention_mask, position_ids = get_batch_fn(
-        neox_args=neox_args, data_iterator=data_iterator
-    )
-    if timers is not None:
-        timers("batch generator").stop()
+    # Error: when we converted loaded pipeline model to sequential, we get a Half/Float error
+    # seems to be due to the differences in devices? LayerNorm is on CPU while attention is on CUDA, and
+    # torch 1.8.1 doesn't support bfloat16 yet...
 
-    output = model((tokens, position_ids, attention_mask))
+    # Generate a batch, assuming a pipeline.
+    # if timers is not None:
+    #     timers("batch generator").start()
+    # data = next(data_iterator)
+    # (tokens, position_ids, attention_mask), (labels, loss_mask) = \
+    #     get_batch_fn(data, neox_args=neox_args)
+    # if timers is not None:
+    #     timers("batch generator").stop()
+
+    # # Get the batch.
+    # if timers is not None:
+    #     timers("batch generator").start()
+    # tokens, (labels, _), attention_mask, position_ids = get_batch_fn(
+    #     neox_args=neox_args, data_iterator=data_iterator
+    # )
+    # if timers is not None:
+    #     timers("batch generator").stop()
+    #
+    # import pdb; pdb.set_trace()
+    # output = model((tokens, position_ids, attention_mask))
     # out_labels = tokens[batch_output_key] if batch_output_key else None
 
-    return output, labels
+    # return output, labels
 
 
 def extract_loop(
@@ -34,6 +50,7 @@ def extract_loop(
     timers,
     model,
     data_iterator,
+    data_iter2,
     eval_batch_fn,
     output_dir,
     batch_data_key=None,
@@ -48,7 +65,7 @@ def extract_loop(
     output_dir: where to store the output representations
     batch_data_key: the key in the dataset batch that needs to be stored along with the representations
     """
-    assert not neox_args.is_pipe_parallel, "Please turn pipe parallelism off to extract logits"
+    # assert not neox_args.is_pipe_parallel, "Please turn pipe parallelism off to extract logits"
     num_samples = len(data_iterator)
     flush_write_period = 100
     total_iters = int(ceil(num_samples / neox_args.batch_size))
@@ -65,10 +82,18 @@ def extract_loop(
                 )
             try:
                 prefix = "iteration {}".format(iteration)
-                logits, tokens = extract_forward_step(neox_args, data_iterator, model, timers,
+                logits = extract_forward_step(neox_args, data_iterator, model, timers,
                                                       eval_batch_fn, batch_data_key)
                 logits = logits.cpu().numpy()
+                data = next(data_iter2)
+                assert logits.shape[0] == data['input_ids'].shape[0], f"Batch sizes don't match!"
+                assert logits.shape[1] == data['input_ids'].shape[2], f"Sequence lengths don't match!"
+                text_labels = data['source']
+                if isinstance(text_labels[0], list) and len(text_labels[0]) == 1:
+                    text_labels = text_labels[0]
+                assert logits.shape[0] == len(text_labels), "Batch size of logits doesn't match label data"
             except StopIteration:  # out of data
+                print("We're out of data!")
                 break
             if iteration == 0:
                 print_rank_0("Creating memory mapped tensors...")
@@ -100,17 +125,17 @@ def extract_loop(
                 j = i + this_batch_size
                 output[bin_id][i:j, :this_seq_length, :] = logits
                 if batch_data_key:
-                    path_dict[bin_id][i:j] = tokens
+                    path_dict[bin_id][i:j] = text_labels
                 if j == output[bin_id].shape[0]:
                     print_rank_0("Resetting indices for next memmap tensor...")
                     i, j = 0, 0
-                print_rank_0(i, j)
+                # print_rank_0(i, j)
             else:
                 i = j
                 j = i + this_batch_size
                 output[i:j, :this_seq_length, :] = logits
                 if batch_data_key:
-                    path_array[i:j] = tokens
+                    path_array[i:j] = text_labels
             # When contiguous memory optimizations are enabled, the buffers
             # allocated by the optimizations are deallocated during backward pass
             # in the absence of backward pass the buffers should be reset after each

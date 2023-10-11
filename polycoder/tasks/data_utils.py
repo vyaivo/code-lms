@@ -88,7 +88,7 @@ def collate_fn_pad(batch, data_keys_to_collate=[],
 
 
 class SeqLengthSampler(torch.utils.data.Sampler):
-    def __init__(self, data_source, batch_size, bucket_boundaries):
+    def __init__(self, data_source, batch_size, bucket_boundaries, shuffle=True):
         super().__init__(data_source)
         if isinstance(data_source['length'], torch.Tensor):
             self.ind_n_len = data_source['length'].numpy()
@@ -113,11 +113,13 @@ class SeqLengthSampler(torch.utils.data.Sampler):
             data_buckets[b] = np.where(bin_inds == b)[0]
         self.data_buckets = data_buckets
         self.batch_size = batch_size
+        self.shuffle = shuffle
 
     def __iter__(self):
         iter_list = []
         for k in self.data_buckets.keys():
-            np.random.shuffle(self.data_buckets[k])
+            if self.shuffle:
+                np.random.shuffle(self.data_buckets[k])  # this is an in-place operation.
             # VAV: the following line of code will NOT yield perfect batches -- some of the leftovers
             # get grouped into bigger batches!
             iter_list += (np.array_split(self.data_buckets[k],
@@ -130,7 +132,7 @@ class SeqLengthSampler(torch.utils.data.Sampler):
         return self.data_len
 
 
-def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop_last=True):
+def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop_last=True, shuffle=True):
     """Build dataloader given an input dataset. Minor modification of megatron.data.data_utils"""
     from megatron.data.samplers import DistributedBatchSampler
 
@@ -152,13 +154,16 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop
         s2_batch = neox_args.batch_size if (world_size > 1) else 1
 
     if seq_length_bins:
-        sampler = SeqLengthSampler(dataset, batch_size=s1_batch, bucket_boundaries=seq_length_bins)
+        sampler = SeqLengthSampler(dataset, batch_size=s1_batch, bucket_boundaries=seq_length_bins,
+                                   shuffle=shuffle)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
                                                 batch_size=s2_batch,
                                                 drop_last=drop_last,
                                                 rank=rank,
                                                 world_size=world_size)
     else:
+        if shuffle:
+            print_rank_0("WARNING: You requested data shuffling, but it likely doesn't work with built-in samplers")
         # Use a simple sampler with distributed batch sampler.
         sampler = torch.utils.data.SequentialSampler(dataset)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
@@ -177,7 +182,7 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop
                                        pin_memory=True)
 
 
-def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bins=None, drop_last=True):
+def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bins=None, drop_last=True, shuffle=True):
     (train_dataloader, valid_dataloader, test_dataloader) = (None, None, None)
 
     print_rank_0('> building train, validation, and test datasets ...')
@@ -209,9 +214,12 @@ def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bin
 
         # Build dataloaders.
         if pad_sequences:
-            train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins, drop_last=drop_last)
-            valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins, drop_last=drop_last)
-            test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins, drop_last=drop_last)
+            train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins,
+                                                             drop_last=drop_last, shuffle=shuffle)
+            valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins,
+                                                             drop_last=drop_last, shuffle=shuffle)
+            test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins,
+                                                             drop_last=drop_last, shuffle=shuffle)
         else:
             train_dataloader = make_data_loader(train_ds, neox_args=neox_args)
             valid_dataloader = make_data_loader(valid_ds, neox_args=neox_args)
@@ -291,7 +299,7 @@ def get_batch_pipe(data, keys, custom_batch_fn, neox_args):
     """Generate a batch, assuming a pipeline module."""
 
     tokens, (labels, loss_mask), attention_mask, position_ids = custom_batch_fn(
-        neox_args, neox_args.tokenizer, keys, data
+        neox_args, tokenizer=neox_args.tokenizer, keys=keys, data=data
     )
     # VAV: need to return data in this order to be compatible with deepspeed pipelining code
     # unpack data

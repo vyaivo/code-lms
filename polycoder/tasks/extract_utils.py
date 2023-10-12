@@ -86,15 +86,22 @@ def extract_loop(
                                                       eval_batch_fn, batch_data_key)
                 logits = logits.cpu().numpy()
                 data = next(data_iter2)
-                assert logits.shape[0] == data['input_ids'].shape[0], f"Batch sizes don't match!"
-                assert logits.shape[1] == data['input_ids'].shape[2], f"Sequence lengths don't match!"
+                data_tokens = data['input_ids'].squeeze(1)
+                if data_tokens.ndim > 2:
+                    data_tokens = data_tokens.squeeze()
+                    assert data_tokens.ndim == 2
+                assert logits.shape[0] == data_tokens.shape[0], f"Batch sizes don't match!"
+                assert logits.shape[1] == data_tokens.shape[1], f"Sequence lengths don't match!"
                 text_labels = data['source']
-                if isinstance(text_labels[0], list) and len(text_labels[0]) == 1:
+                if isinstance(text_labels[0], list) and len(text_labels) == 1:
                     text_labels = text_labels[0]
                 assert logits.shape[0] == len(text_labels), "Batch size of logits doesn't match label data"
             except StopIteration:  # out of data
                 print("We're out of data!")
                 break
+            except Exception as e:
+                print(e)
+                import pdb; pdb.set_trace()
             if iteration == 0:
                 print_rank_0("Creating memory mapped tensors...")
                 if samples_per_split_bin:

@@ -69,9 +69,6 @@ def extract_lore_representations(neox_args):
 
     # Extract for each split in the dataset
     for i, (split, loader) in enumerate(zip(data_split_names, data_loaders)):
-        if i != 2:
-            print(f'Skipping {split} data for VAV DEBUG purposes')
-            continue
         output_path = os.path.join(output_path, split)
         os.makedirs(output_path, exist_ok=True)
         extract_loop(neox_args, timers, model, iter(loader), iter(loader), eval_batch_fn,
@@ -89,9 +86,10 @@ def lore_batch_fn(neox_args, keys, data, datatype=torch.int64, tokenizer=None):
 
     if tokens.ndim > 2:
         # this is to debug an intermittent error that we're getting in batching
-        print(data)
-        print(tokens.shape)
-        import pdb; pdb.set_trace()
+        try:
+            tokens = data_b["input_ids"].long().squeeze().contiguous()
+        except Exception as e:
+            print(e)
 
     # labels = data_x["source"]
     labels = torch.zeros((1, 2)).to(datatype)  # dummy values

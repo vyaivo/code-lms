@@ -20,6 +20,7 @@
 import copy
 import json
 import os
+import pickle
 import time
 from typing import List, Union
 
@@ -451,11 +452,13 @@ def generate_samples_from_prompt(
 
             if context_length >= (neox_args.seq_length // 2):
                 print_rank_0(
-                    "\nWarning! Context length",
+                    f"\nWarning for sample {input_pos}! Context length",
                     context_length,
                     "\nPlease give smaller context (e.g. half of the "
                     "max sequence length)!",
                 )
+                print_rank_0("Skipping this sample...")
+                continue
         if not is_mp_rank_0():
             context_tokens = neox_args.tokenizer.tokenize("EMPTY TEXT")
             context_length = len(context_tokens)
@@ -464,7 +467,10 @@ def generate_samples_from_prompt(
 
         terminate_runs = broadcast_terminate_signal(terminate_runs)
         if terminate_runs == 1:
-            return generated_texts
+            if len(generated_texts) > 1:
+                return generated_texts
+            else:
+                return []
 
         for (
             batch_context_tokens,
@@ -534,8 +540,17 @@ def generate_samples_from_prompt(
                     "duration_seconds": float(time.time() - start_time),
                 }
                 generated_texts.append(data)
-
+    
     return generated_texts
+
+
+def save_generated_samples_from_list(neox_args, model, samples):
+    generations = generate_samples_from_prompt(neox_args, model, samples, top_k=neox_args.top_k, top_p=neox_args.top_p, temperature=neox_args.temperature, recompute=neox_args.recompute, maximum_tokens=neox_args.maximum_tokens)
+    if is_mp_rank_0() and len(generations) > 1:
+        print_rank_0(f"Saving generated outputs to pickle file {neox_args.sample_output_file}...")
+        with open(neox_args.sample_output_file, 'wb') as outf:
+            pickle.dump(generations, outf)
+        print_rank_0(f"...done!")
 
 
 def generate_samples_input_from_file(

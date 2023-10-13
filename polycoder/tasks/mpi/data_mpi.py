@@ -13,8 +13,8 @@ import numpy
 import torch
 
 
-def build_mpi_dataset(neox_args, unused_nsample_list=None):
-    if os.path.exists(os.path.join(neox_args.finetune_data_path, "test/data.arrow")):
+def build_mpi_dataset(neox_args, unused_nsample_list=None, rebuild=False):
+    if (not rebuild) and os.path.exists(os.path.join(neox_args.finetune_data_path, "test/data.arrow")):
         tokenized_datasets = trd.load_from_disk(neox_args.finetune_data_path)
     else:
         # Build the dataset
@@ -35,7 +35,7 @@ def build_mpi_dataset(neox_args, unused_nsample_list=None):
 
         def tokenize_and_parse(example):
             tmp = f'{example["code"]}\n{example["mpi_labels"]}'
-            example["input_ids"] = tokenizer.tokenize(tmp)
+            example["input_ids"] = tokenizer.tokenize(tmp) + [tokenizer.eod_id]
             example["length"] = len(example["input_ids"])
             # example["input_ids"] = tokenizer.tokenize(example["code"])
             # example["mpi_completion"] = tokenizer.tokenize(example["mpi_labels"])

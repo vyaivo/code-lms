@@ -343,7 +343,6 @@ class GPT2ModelPipe(PipelineModule, torch.nn.Module):
 class GPT2Finetune(GPT2ModelPipe):
     """
     Just modifies the GPT2 model by removing the projection to the word embeddings.
-    TODO: test if this work with loading pre-trained weights
     """
 
     def __init__(self, neox_args, num_tokentypes=0, parallel_output=True, topology=None, inference=False,

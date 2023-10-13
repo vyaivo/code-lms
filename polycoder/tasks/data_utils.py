@@ -18,10 +18,10 @@ def unwrap_lists(list_data, data_type=torch.Tensor):
         if isinstance(list_data[0], data_type):
             return list_data
         else:
-            return unwrap_lists(list_data[0])
+            return unwrap_lists(list_data[0], data_type)
 
 
-def broadcast_data_list(keys, data):
+def broadcast_data_list(keys, data, is_tensor=True, data_type=torch.Tensor):
     """Broadcast data from rank zero of each model parallel group to the
         members of the same model parallel group.
 
@@ -36,10 +36,12 @@ def broadcast_data_list(keys, data):
         for k in keys:
             if isinstance(data[k], list):
                 # Handle nested lists
-                data[k] = unwrap_lists(data[k])
-                data[k] = [d.squeeze().cuda() for d in data[k]]
+                data[k] = unwrap_lists(data[k], data_type)
+                if is_tensor:
+                    data[k] = [d.squeeze().cuda() for d in data[k]]
             else:
-                data[k] = data[k].squeeze().cuda()
+                if is_tensor:
+                    data[k] = data[k].squeeze().cuda()
             data_list.append(data[k])
     else:
         data_list = [None] * len(keys)
@@ -53,9 +55,10 @@ def broadcast_data_list(keys, data):
     return output
 
 
-def collate_fn_pad(batch, data_keys_to_collate=[], pad_keys=['text', 'input_ids', 'attention_mask'], report_lengths=False):
+def collate_fn_pad(batch, data_keys_to_collate=[],
+                   pad_keys=['text', 'input_ids', 'attention_mask'],
+                   report_lengths=False):
     from torch.utils.data._utils.collate import default_collate
-
     elem = batch[0]
     elem_type = type(elem)
 
@@ -63,9 +66,9 @@ def collate_fn_pad(batch, data_keys_to_collate=[], pad_keys=['text', 'input_ids'
         out_dict = {}
         for key in elem:
             item_list = [d[key] for d in batch]
-            item_list = unwrap_lists(item_list)
             # Custom behavior: pad this baby!
             if key in pad_keys:
+                item_list = unwrap_lists(item_list)
                 # Handle nested list[list[Tensor]]
                 padded_item = torch.nn.utils.rnn.pad_sequence(item_list, batch_first=True)
                 out_dict.update({key: padded_item})
@@ -85,7 +88,7 @@ def collate_fn_pad(batch, data_keys_to_collate=[], pad_keys=['text', 'input_ids'
 
 
 class SeqLengthSampler(torch.utils.data.Sampler):
-    def __init__(self, data_source, batch_size, bucket_boundaries):
+    def __init__(self, data_source, batch_size, bucket_boundaries, shuffle=True):
         super().__init__(data_source)
         if isinstance(data_source['length'], torch.Tensor):
             self.ind_n_len = data_source['length'].numpy()
@@ -97,6 +100,11 @@ class SeqLengthSampler(torch.utils.data.Sampler):
         self.data_len = len(data_source) - outside_bins
         if outside_bins > 0:
             print(f'Excluding {outside_bins} samples because they fall outside length bins')
+            if outside_bins < 25:
+                print(f'Excluded samples have lengths: {self.ind_n_len[bin_inds == 0]}')
+            else:
+                excluded = self.ind_n_len[bin_inds == 0]
+                print(f'Excluded sample lengths at 5%, 50%, and 95%: {np.percentile(excluded, [5, 50, 95])}')
         uniq_bins = np.unique(bin_inds)
         data_buckets = {}
         for b in uniq_bins:
@@ -105,11 +113,15 @@ class SeqLengthSampler(torch.utils.data.Sampler):
             data_buckets[b] = np.where(bin_inds == b)[0]
         self.data_buckets = data_buckets
         self.batch_size = batch_size
+        self.shuffle = shuffle
 
     def __iter__(self):
         iter_list = []
         for k in self.data_buckets.keys():
-            np.random.shuffle(self.data_buckets[k])
+            if self.shuffle:
+                np.random.shuffle(self.data_buckets[k])  # this is an in-place operation.
+            # VAV: the following line of code will NOT yield perfect batches -- some of the leftovers
+            # get grouped into bigger batches!
             iter_list += (np.array_split(self.data_buckets[k],
                                          int(self.data_buckets[k].shape[0] / self.batch_size)))
         # shuffle(iter_list)  # shuffle batches so that they aren't ordered by bucket size
@@ -120,7 +132,7 @@ class SeqLengthSampler(torch.utils.data.Sampler):
         return self.data_len
 
 
-def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
+def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None, drop_last=True, shuffle=True):
     """Build dataloader given an input dataset. Minor modification of megatron.data.data_utils"""
     from megatron.data.samplers import DistributedBatchSampler
 
@@ -138,31 +150,39 @@ def make_data_loader_with_padding(dataset, neox_args, seq_length_bins=None):
                          pad_keys=neox_args.pad_data_keys)
 
     if seq_length_bins:
-        sampler = SeqLengthSampler(dataset, global_batch_size, seq_length_bins)
+        s1_batch = global_batch_size
+        s2_batch = neox_args.batch_size if (world_size > 1) else 1
+
+    if seq_length_bins:
+        sampler = SeqLengthSampler(dataset, batch_size=s1_batch, bucket_boundaries=seq_length_bins,
+                                   shuffle=shuffle)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
-                                                batch_size=neox_args.batch_size,
-                                                drop_last=True,
+                                                batch_size=s2_batch,
+                                                drop_last=drop_last,
                                                 rank=rank,
                                                 world_size=world_size)
     else:
+        if shuffle:
+            print_rank_0("WARNING: You requested data shuffling, but it likely doesn't work with built-in samplers")
         # Use a simple sampler with distributed batch sampler.
         sampler = torch.utils.data.SequentialSampler(dataset)
         batch_sampler = DistributedBatchSampler(sampler=sampler,
                                                 batch_size=global_batch_size,
-                                                drop_last=True,
+                                                drop_last=drop_last,
                                                 rank=rank,
                                                 world_size=world_size)
 
     print_rank_0(f'Dataset has {len(batch_sampler)} samples')
     # Torch dataloader.
     return torch.utils.data.DataLoader(dataset,
+                                       sampler=None,
                                        batch_sampler=batch_sampler,
                                        num_workers=num_workers,
                                        collate_fn=collate_fn,
                                        pin_memory=True)
 
 
-def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bins=None):
+def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bins=None, drop_last=True, shuffle=True):
     (train_dataloader, valid_dataloader, test_dataloader) = (None, None, None)
 
     print_rank_0('> building train, validation, and test datasets ...')
@@ -194,9 +214,12 @@ def build_dataloaders(neox_args, get_dataset_fn, pad_sequences=False, length_bin
 
         # Build dataloaders.
         if pad_sequences:
-            train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins)
-            valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins)
-            test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins)
+            train_dataloader = make_data_loader_with_padding(train_ds, neox_args, length_bins,
+                                                             drop_last=drop_last, shuffle=shuffle)
+            valid_dataloader = make_data_loader_with_padding(valid_ds, neox_args, length_bins,
+                                                             drop_last=drop_last, shuffle=shuffle)
+            test_dataloader = make_data_loader_with_padding(test_ds, neox_args, length_bins,
+                                                             drop_last=drop_last, shuffle=shuffle)
         else:
             train_dataloader = make_data_loader(train_ds, neox_args=neox_args)
             valid_dataloader = make_data_loader(valid_ds, neox_args=neox_args)
@@ -276,7 +299,7 @@ def get_batch_pipe(data, keys, custom_batch_fn, neox_args):
     """Generate a batch, assuming a pipeline module."""
 
     tokens, (labels, loss_mask), attention_mask, position_ids = custom_batch_fn(
-        neox_args, neox_args.tokenizer, keys, data
+        neox_args, tokenizer=neox_args.tokenizer, keys=keys, data=data
     )
     # VAV: need to return data in this order to be compatible with deepspeed pipelining code
     # unpack data

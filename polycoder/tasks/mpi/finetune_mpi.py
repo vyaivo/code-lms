@@ -42,7 +42,8 @@ def mpi_generation(neox_args):
         #     return Dataset(name, [datapath], tokenizer, args.seq_length)
         # return accuracy_func_provider(single_dataset_provider)
 
-    data_iter_fn = partial(build_dataloaders, get_dataset_fn=build_mpi_dataset,
+    data_iter_fn = partial(build_dataloaders,
+                           get_dataset_fn=partial(build_mpi_dataset, rebuild=True),
                            pad_sequences=True, length_bins=[2048, 1024, 512, 0])
 
     data_keys = ["input_ids"]  #, "mpi_labels"]  #, "mpi_completion"]

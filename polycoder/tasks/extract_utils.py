@@ -8,7 +8,7 @@ from math import ceil
 from megatron import print_rank_0
 
 
-def extract_forward_step(neox_args, data_iterator, model, timers,
+def extract_forward_step(neox_args, data_iterator, model, 
                          get_batch_fn, batch_output_key="source"):
     """Eval forward step that only outputs logits and token sources, no loss."""
     if neox_args.is_pipe_parallel:
@@ -47,7 +47,6 @@ def extract_forward_step(neox_args, data_iterator, model, timers,
 
 def extract_loop(
     neox_args,
-    timers,
     model,
     data_iterator,
     data_iter2,
@@ -82,7 +81,7 @@ def extract_loop(
                 )
             try:
                 prefix = "iteration {}".format(iteration)
-                logits = extract_forward_step(neox_args, data_iterator, model, timers,
+                logits = extract_forward_step(neox_args, data_iterator, model, 
                                                       eval_batch_fn, batch_data_key)
                 logits = logits.cpu().numpy()
                 data = next(data_iter2)

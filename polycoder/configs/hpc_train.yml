@@ -1,17 +1,19 @@
 {
   # BPE
-  #"data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/gpt2tok/allc_code_document",
+  "data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/gpt2tok/allc_code_document",
   #"data-path": "HPCorpus_final/pre_train/fortran/gpt2tok/fortran_code_document",
-  #"vocab-file": "data/gpt2-vocab.json",
-  #"merge-file": "data/gpt2-merges.txt",
+  "vocab-file": "data/gpt2-vocab.json",
+  "merge-file": "data/gpt2-merges.txt",
+#  "load": "checkpoints/allc_gpt2tok_2-7B/global_step160000",
+  "save": "checkpoints/allc_gpt2tok_2-7B/full_dataset",
   #"save": "checkpoints/fortran_gpt2tok/hp4_30M_lr25e-5_regularized",
   
   # Tokompiler     
   #"data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/tokompiler/allc_code_document",
-  "data-path": "HPCorpus_final/pre_train/fortran/tokompiler/fortran_code_document",
-  "tokenizer-type": "Tokompiler",
-  "vocab-file": "megatron/tokenizer/tokompiler/tokenizer_vocab/vocab.txt",
-  "save": "checkpoints/fortran_tokompiler/hp6",
+  #"data-path": "HPCorpus_final/pre_train/fortran/tokompiler/fortran_code_document",
+  #"tokenizer-type": "Tokompiler",
+  #"vocab-file": "megatron/tokenizer/tokompiler/tokenizer_vocab/vocab.txt",
+  #"save": "checkpoints/fortran_tokompiler/hp6",
   
   "checkpoint_validation_with_forward_pass": False,
 

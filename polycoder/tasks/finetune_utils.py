@@ -379,6 +379,7 @@ def finetune(neox_args, model_setup_function, build_data_function,
             train_data_iterator, valid_data_iterator, test_data_iterator = (None, None, None)
     timers("train/valid/test data iterators").stop()
 
+    #raise ValueError("Stopping here to figure out number of samples")
     # eval function
     eval_forward = partial(finetune_forward_step, compute_loss_fn=loss_function,
                            return_logits=False, compute_metric=False, get_batch_fn=custom_batch_fn)

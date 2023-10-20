@@ -16,9 +16,8 @@
    "no-weight-tying": true,
 
    # these should provide some speedup but takes a while to build, set to true if desired
-   "scaled-upper-triang-masked-softmax-fusion": false,
-   "bias-gelu-fusion": false,
-
+   "scaled-upper-triang-masked-softmax-fusion": true,
+   "bias-gelu-fusion": true,
 
    # optimizer settings
    "optimizer": {
@@ -39,9 +38,10 @@
     "contiguous_gradients": True,
     "cpu_offload": False
   },
+   "gradient_accumulation_steps": 4,
 
    # batch / data settings
-   "train_micro_batch_size_per_gpu": 4,
+   "train_micro_batch_size_per_gpu": 12,
    "data-impl": "mmap",
 
    # activation checkpointing
@@ -67,8 +67,8 @@
    },
 
    # misc. training settings
-   "train-iters": 160000,
-   "lr-decay-iters": 160000, #320000,
+   "train-iters": 950000,
+   "lr-decay-iters": 950000,
    "distributed-backend": "nccl",
    "lr-decay-style": "cosine",
    "warmup": 0.1,

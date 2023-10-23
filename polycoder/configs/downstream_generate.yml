@@ -1,0 +1,16 @@
+# Parameters used for text generation
+# Make sure `load` is specified somewhere else
+{
+  # Text gen type: `input-file`, `unconditional` or `interactive`
+  "text-gen-type": None,
+ 
+  # Params for all
+  "maximum_tokens": 512,
+  "temperature": 1.0,
+  "top_p": 0.0,
+  "top_k": 0,
+  "recompute": false,
+
+  # input/output file
+  "sample-output-file": "generated_output.pkl",
+}

@@ -1,6 +1,6 @@
 {
   # BPE
-  "data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/gpt2tok/allc_code_document",
+  "data-path": "HPCorpus_final/pre_train/c-cpp-polycoder/bpe/allc_code_document",
   #"data-path": "HPCorpus_final/pre_train/fortran/gpt2tok/fortran_code_document",
   "vocab-file": "data/gpt2-vocab.json",
   "merge-file": "data/gpt2-merges.txt",
@@ -15,6 +15,8 @@
   #"vocab-file": "megatron/tokenizer/tokompiler/tokenizer_vocab/vocab.txt",
   #"save": "checkpoints/fortran_tokompiler/hp6",
   
+#  "hostfile": "pretrain_hostfile", 
+
   "checkpoint_validation_with_forward_pass": False,
 
   "tensorboard-dir": "tensorboard",

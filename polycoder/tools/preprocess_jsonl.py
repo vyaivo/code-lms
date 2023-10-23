@@ -51,10 +51,17 @@ class Encoder(object):
         if self.args.ftfy:
             text = ftfy.fix_text(text)
         ids = {}
-        for sample in tmp:
-            for key in self.args.jsonl_keys:
-                doc_ids = []
-                json_sample = json.loads(sample)
+        doc_ids = []
+        for key in self.args.jsonl_keys:
+             for sample in tmp:                                       
+                if len(sample) < 2:
+                   #print(f"Skipping sample: `{sample}`")
+                   continue
+                try:
+                    json_sample = json.loads(sample)
+                except Exception as e:
+                    print(e)
+                    print(sample)
                 text_ids = Encoder.tokenizer.tokenize(json_sample[key])
                 if len(text_ids) > 0:
                     doc_ids.append(text_ids)

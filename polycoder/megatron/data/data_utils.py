@@ -2,7 +2,7 @@ import math
 import torch
 import numpy as np
 from typing import List, Tuple
-from itertools import zip_longest 
+from itertools import cycle, zip_longest 
 from functools import partial 
 
 from megatron import mpu, print_rank_0
@@ -10,6 +10,8 @@ from megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
 from megatron.data.blendable_dataset import BlendableDataset
 from megatron.data.gpt2_dataset import GPT2Dataset
 from megatron.data.samplers import DistributedBatchSampler
+
+from megatron.utils import is_mp_rank_0
 
 
 def make_data_loader(dataset, neox_args):
@@ -343,7 +345,7 @@ def build_train_valid_test_data_iterators(neox_args):
         train_data_iterator = None
 
     if valid_dataloader is not None:
-        valid_data_iterator = iter(valid_dataloader)
+        valid_data_iterator = cycle(iter(valid_dataloader))
     else:
         valid_data_iterator = None
 
@@ -366,3 +368,4 @@ def compile_helper():
         print("Making C++ dataset helpers module failed, exiting.")
         import sys
         sys.exit(1)
+

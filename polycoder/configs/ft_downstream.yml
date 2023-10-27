@@ -1,12 +1,24 @@
 {
-  "finetune-data-path": "/lm_data/source/",  #dataset/dataset_saved/",
+  #"finetune-data-path": "/lm_data/dataset/dataset_saved/",  #c-cpp/source/"
+  "finetune-data-path": "/lm_data/c-cpp/replaced/",
   "pad-data-keys": ["input_ids"], #, "mpi_completion"],
-  "tokenizer-type": "GPT2BPETokenizer",
-  "vocab-file": "data/gpt2-vocab.json",
-  "merge-file": "data/gpt2-merges.txt",
-  "save": "checkpoints/downstream_tasks/omp_bpeLarge_lr16e-5_b4",
-    #"checkpoints/downstream_tasks/mpi/bpeLarge_lr6e-4_b4/endtoken/",
-  "load": "checkpoints/allc_gpt2tok_2-7B/",
+
+#  # BPE
+#  "tokenizer-type": "GPT2BPETokenizer",
+#  "vocab-file": "data/gpt2-vocab.json",
+#  "merge-file": "data/gpt2-merges.txt",
+
+  # Tokompiler
+  "tokenizer-type": "Tokompiler",
+  "vocab-file": "megatron/tokenizer/tokompiler/tokenizer_vocab/vocab.txt",
+
+#  "load": "checkpoints/downstream_tasks/omp_bpeLarge_lr16e-5_b4",
+#  "load": "checkpoints/downstream_tasks/mpi/bpeLarge_lr6e-4_b4/endtoken/",
+  #"load": "checkpoints/allc_gpt2tok_2-7B/",
+#  "load": "checkpoints/allc_tokompiler_700M/",
+  "load": "checkpoints/downstream_tasks/omp_tokompiler_700M_lr16e-5_b4",
+  #"save": "checkpoints/downstream_tasks/omp_bpeLarge_lr16e-5_b4",
+#  "save": "checkpoints/downstream_tasks/omp_tokompiler_700M_lr16e-5_b4",
   "finetune": True,
   "split": "100,0,0",
   

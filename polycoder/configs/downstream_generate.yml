@@ -5,7 +5,7 @@
   "text-gen-type": None,
  
   # Params for all
-  "maximum_tokens": 512,
+  "maximum_tokens": 128,  #512,
   "temperature": 1.0,
   "top_p": 0.0,
   "top_k": 0,

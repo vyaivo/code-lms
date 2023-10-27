@@ -20,6 +20,12 @@ def build_omp_dataset(neox_args, unused_nsample_list=None, rebuild=False):
         # Build the dataset
         from megatron.tokenizer import build_tokenizer
         tokenizer = build_tokenizer(neox_args)
+        if neox_args.tokenizer_type.lower() == 'GPT2BPETokenizer'.lower():
+            eos_token = tokenizer.eod_id
+        elif neox_args.tokenizer_type.lower() == 'Tokompiler'.lower():
+            eos_token = tokenizer.eod
+        else:
+            raise NotImplementedError(f"We do not support the tokenizer type {neox_args.tokenizer_type}")
 
         feature_types = trd.Features({
             "code": Value("string"),
@@ -33,9 +39,9 @@ def build_omp_dataset(neox_args, unused_nsample_list=None, rebuild=False):
                              split=['train[0%:80%]', 'train[80%:90%]', 'train[90%:100%]'])
         d = trd.DatasetDict({'train': d[0], 'validation': d[1], 'test': d[2]})
 
-        def tokenize_and_parse(example):
+        def tokenize_and_parse(example, eos_token=eos_token):
             tmp = f'{example["code"]}\n{example["pragma"]}'
-            example["input_ids"] = tokenizer.tokenize(tmp) + [tokenizer.eod_id]
+            example["input_ids"] = tokenizer.tokenize(tmp) + [eos_token]  #[tokenizer.eod_id]
             example["length"] = len(example["input_ids"])
             return example
 

@@ -1,5 +1,6 @@
-# Logs
+# Logs & other misc files
 *log*.txt
+*tmp*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

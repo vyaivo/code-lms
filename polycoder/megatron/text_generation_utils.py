@@ -391,6 +391,7 @@ def generate_samples_from_prompt(
     top_p: float = 0.0,
     stop_tokens=None,
     broadcast_generated_tokens=False,
+    max_input_length=None
 ):
     """
     Generates samples from raw text and returns them in a dictionary.
@@ -431,6 +432,9 @@ def generate_samples_from_prompt(
     input_count = len(text)
     input_pos = 0
 
+    if max_input_length is None:
+        max_input_length = neox_args.seq_length // 2
+
     # generate completions
     generated_texts = []
     while True:
@@ -450,7 +454,7 @@ def generate_samples_from_prompt(
                 context_tokens = neox_args.tokenizer.tokenize(raw_text)
             context_length = len(context_tokens)
 
-            if context_length >= (neox_args.seq_length // 2):
+            if context_length >= (max_input_length):  #neox_args.seq_length // 2):
                 print_rank_0(
                     f"\nWarning for sample {input_pos}! Context length",
                     context_length,
@@ -544,13 +548,15 @@ def generate_samples_from_prompt(
     return generated_texts
 
 
-def save_generated_samples_from_list(neox_args, model, samples):
-    generations = generate_samples_from_prompt(neox_args, model, samples, top_k=neox_args.top_k, top_p=neox_args.top_p, temperature=neox_args.temperature, recompute=neox_args.recompute, maximum_tokens=neox_args.maximum_tokens)
+def save_generated_samples_from_list(neox_args, model, samples, max_input_length=None):
+    generations = generate_samples_from_prompt(neox_args, model, samples, top_k=neox_args.top_k, top_p=neox_args.top_p, temperature=neox_args.temperature, recompute=neox_args.recompute, maximum_tokens=neox_args.maximum_tokens, max_input_length=max_input_length)
     if is_mp_rank_0() and len(generations) > 1:
         print_rank_0(f"Saving generated outputs to pickle file {neox_args.sample_output_file}...")
         with open(neox_args.sample_output_file, 'wb') as outf:
             pickle.dump(generations, outf)
         print_rank_0(f"...done!")
+    else:
+        return None
 
 
 def generate_samples_input_from_file(

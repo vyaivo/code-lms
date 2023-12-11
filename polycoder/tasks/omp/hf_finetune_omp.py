@@ -1,41 +1,27 @@
-# Also tested for newest transformers version
-# Tested for transformers==4.23.1, torch==1.12.1
+# v0.1 of code by Tal Kadosh, BGU/Technion
+# Taken from talkad fork of vyaivo/code-lms
 
-import argparse
-from functools import partial
-import numpy as np
+
 import os, sys
-import tqdm
-from typing import Literal
-
 import torch
-from torch.utils.data import DataLoader, Sampler, BatchSampler
-from dataclasses import dataclass, field
+import logging
+from torch.optim import AdamW
+from transformers import get_cosine_with_hard_restarts_schedule_with_warmup, Trainer, TrainingArguments
+from tqdm.auto import tqdm
+from torch.nn.functional import cross_entropy, one_hot
+from torch.utils.data import DataLoader, Dataset, BatchSampler, Sampler
 from transformers import GPTNeoXForCausalLM, GPT2Tokenizer
-from transformers import HfArgumentParser, TrainingArguments, Trainer
 from transformers import DataCollatorForLanguageModeling, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from accelerate import Accelerator
+from torch.cuda.amp import autocast
 
-# Imports needs for FSDP
-#from accelerate import FullyShardedDataParallelPlugin
-#from torch.distributed.fsdp.fully_sharded_data_parallel import (
-#    MixedPrecision, CPUOffload,
-#    FullOptimStateDictConfig, FullStateDictConfig
-#)
-##from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-# Imports to try gradient checkpointing
-#from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-#    checkpoint_wrapper,
-#    CheckpointImpl,
-#    apply_activation_checkpointing,
-#)
+# My own script/function imports
+import hf_data_omp as data_omp
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_utils import SeqLengthSampler
 
-# Dataset specific import
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-print(f'PATH is now {sys.path}')
-from tasks.omp.hf_data_omp import build_omp_dataset as dataset_builder
-from tasks.data_utils import SeqLengthSampler  # sampler that batches out longest sequences first -- with some randomness within length bins. Will ensure better memory allocation
+logger = logging.getLogger()
 
 
 class DistributedSampler(Sampler):
@@ -111,198 +97,185 @@ class DistributedBatchSampler(BatchSampler):
         return len(self.batch_sampler)
 
 
-def main(data_args, training_args, model):
-    # CPU acceleration, fp16 is averaging ~30s/it
+class CustomDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
 
-    # My FSDP setup runs into an OOM error for max length sequences, even at batch size 1.
-    # FSDP with 2 GPUs (48GB A40 GPUs) averaging ~5s/it with CPU offloading of parameters
-    # FSDP with 2 GPUs (48GB A40 GPUs) averaging ~3s/it with all above, but bfloat16
-    #fsdp_plugin = FullyShardedDataParallelPlugin(cpu_offload=CPUOffload(offload_params=True),
-    #    state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-    #    optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
-    #    mixed_precision_policy=MixedPrecision(param_dtype=torch.bfloat16,
-    #                                          reduce_dtype=torch.bfloat16,
-    #                                          buffer_dtype=torch.bfloat16),
-    #    activation_checkpointing=True,
-    #    limit_all_gathers=True,
-    #)
-    #accel = Accelerator(fsdp_plugin=fsdp_plugin)
-    #print(fsdp_plugin)
-    accel = Accelerator(cpu=True)
+    def __len__(self):
+        return len(self.data)
 
-    # Model needs to be prepared before the optimizer
-    model = model.to(accel.device)
-    model = accel.prepare(model)
-    print(f'DEVICE IS {model.device}')
-    print(model)
-    print(accel)
+    def __getitem__(self, idx):
+        return {'input_ids': torch.tensor(self.data[idx]['input_ids']),
+                'labels': torch.tensor(self.data[idx]['labels'])}
 
-    # Attempt to get activation checkpointing to work...
-    #check_fn = lambda subm: isinstance(subm, torch.nn.Linear)
-    #non_reentrant_wrapper = partial(
-    #    checkpoint_wrapper,
-    #    offload_to_cpu=True,
-    #    checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-    #)
-    #apply_activation_checkpointing(
-    #    model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
-    #)
 
-    # TODO: make this also compatible with Tokompiler
-    # Build tokenizer
-    tokenizer = GPT2Tokenizer(vocab_file=data_args.vocab_file, merges_file=data_args.merge_file, padding=True,
-                              truncation=True, model_input_names=['input_ids'])
-    tokenizer.pad_token = tokenizer.eos_token
-    datasets = dataset_builder(None, None, tokenizer=tokenizer,
-                               data_path=data_args.data_path, save_dataset=data_args.save_dataset)
-    # NOTE: The following map() function re-tokenizes the dataset...even though that already happens in the original dataset builder, I am overwriting that data field since the standard HF method has a fast method for hashing/caching all dataset transforms. Since this is redundant, you can remove the tokenization from the dataset builder code if you wish.
+def tokenize(args, tokenizer, sample):
+    max_size = 2048
+    if not args.is_replaced:
+        encodings = tokenizer(sample['full'], max_length=max_size, add_special_tokens=True, truncation=True, padding=True)
+#        if len(encodings['input_ids']) < max_size:
+#            encodings['input_ids'].append(tokenizer.eos_token_id)
+        encodings['length'] = len(encodings['input_ids'])
+    else:
+        encodings = {}
+        encodings['input_ids'] = tokenizer(sample['full'], max_length=max_size, add_special_tokens=True, truncation=True, padding=True)
+        encodings['labels'] = encodings['input_ids'][:]
+    return encodings
+
+
+def finetune(args):
+    logger.info(f'start finetune {args.model_name}')
+
+    if args.accel:
+        from accelerate import Accelerator
+        if args.device == 'cpu':
+            accel = Accelerator()
+            logger.info(accel.__dict__)
+        else:
+            raise NotImplementedError("Untested for combination of HF Accelerator + devices other than CPU")
+
+    # TOKENIZER
+    if args.is_replaced:
+        from tokenizer import TokompilerTokenizer
+        tokom_extended_tokens = ['parallel', 'private', 'reduction']
+        tokenizer = TokompilerTokenizer(vocab_path=args.vocab_file)
+        tokenizer.add_tokens(tokom_extended_tokens)
+        tokenizer.enable_padding(length=2048)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained("NinedayWang/PolyCoder-2.7B", 
+                                  truncation=True, model_input_names=['input_ids'])
+
+        # tokenizer = GPT2Tokenizer(vocab_file=args.vocab_file, merges_file=args.merge_file, padding=True,
+        #                         truncation=True, model_input_names=['input_ids'])
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # DATA
+    datasets = data_omp.build_omp_dataset(args)
+
     newd = []
     for i in range(len(datasets)):
         d = datasets[i]
-        outd = d.map(lambda examples: tokenizer(examples['code']), remove_columns=['source', 'code'])
+        outd = d.map(lambda examples: tokenize(args, tokenizer, examples), remove_columns=['pragma', 'code', 'hash', 'full'])     
         newd.append(outd)
-    traind, vald, testd = newd
-
-    world_size = accel.num_processes
-    accel.print(f"Reading world_size as {world_size}...")
-    sampler_batch_sz = training_args.per_device_train_batch_size * world_size
-    distr_batch_sz = training_args.per_device_train_batch_size if world_size > 1 else 1
-
-    # Build data loader
-    collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    length_sampler = SeqLengthSampler(traind, bucket_boundaries=[2048, 1526, 1024, 0],
-                                      batch_size=sampler_batch_sz)
-    batch_sampler = DistributedBatchSampler(length_sampler, num_replicas=world_size, rank=accel.process_index)
-    train_loader = DataLoader(dataset=traind, batch_size=training_args.per_device_train_batch_size,
-                              collate_fn=collator, sampler=None, batch_sampler=batch_sampler)
-    val_sampler0 = SeqLengthSampler(vald, bucket_boundaries=[2048, 1526, 1024, 0],
-                                    batch_size=sampler_batch_sz)
-    val_batch_sampler = DistributedBatchSampler(val_sampler0, num_replicas=world_size, rank=accel.process_index)
-    val_loader = DataLoader(dataset=vald, batch_size=training_args.per_device_train_batch_size,
-                            collate_fn=collator, shuffle=False,
-                            sampler=None, batch_sampler=val_batch_sampler)
-
-    # Setup optimizer and learning rate scheduler
-    num_epochs, learning_rate, grad_accum_steps = int(training_args.num_train_epochs), training_args.learning_rate, \
-        int(training_args.gradient_accumulation_steps)
-
-    optimizer = torch.optim.Adam(model.parameters(), learning_rate)
-    lr_scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
-                                                   num_warmup_steps=100,
-                                                   num_training_steps=(len(train_loader) * num_epochs) // grad_accum_steps,)
-    # SGD is a lower memory footprint optimizer...likely don't need
-#    optimizer = torch.optim.SGD(model.parameters(), learning_rate)
-#    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(len(train_loader) * num_epochs) // grad_accum_steps)
-
-    train_loader, val_loader, optimizer, lr_scheduler = \
-        accel.prepare([train_loader, val_loader, optimizer, lr_scheduler])
-
-    for epoch in range(num_epochs):
-        model.train()
-        pbar = tqdm.tqdm(train_loader, miniters=2, desc=f"Epoch {epoch}")
-        loss_total = 0.0 
-        for step, batch in enumerate(pbar):
-            del batch['length']
-            # We could avoid this line since we set the accelerator with `device_placement=True`.
-            batch.to(accel.device)
-            outputs = model(**batch)
-            loss = outputs.loss
-            loss = loss / grad_accum_steps
-            accel.backward(loss)
-            if step % grad_accum_steps == 0:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-            loss_total += loss.detach().clone().item()
-            if (step > 0) and (step % 10 == 0):
-                pbar.set_postfix({"avg_train_loss": loss_total / step})
-            # TODO: add checkpoint saving
-            if step % training_args.save_steps == 0:
-                accel.print("Saving checkpoint...") 
-                model.save_pretrained(training_args.output_dir + f'/e{epoch}_s{step}',
-                                      is_main_process=accel.is_main_process,
-                                      save_function=accel.save)
-                accel.print("saved!") 
-
-        model.eval()
-        pbar = tqdm.tqdm(val_loader, miniters=2, desc=f"Epoch {epoch} Validation")
-        val_loss_total = 0.0
-        for step, batch in enumerate(pbar):  #val_loader):
-            del batch['length']
-            # We could avoid this line since we set the accelerator with `device_placement=True`.
-            batch.to(accel.device)
-            with torch.no_grad():
-                outputs = model(**batch)
-            loss = outputs.loss
-            val_loss_total += loss.detach().clone().item()
-            if ((step > 0) and (step % 10 == 0)) or (step == len(pbar)):
-                pbar.set_postfix({"avg_val_loss": val_loss_total / step})
-            #predictions = outputs.logits.argmax(dim=-1)
-            #predictions, references = accel.gather_for_metrics((predictions, batch["labels"]))
-            # metric.add_batch(
-            #     predictions=predictions,
-            #     references=references,
-            # )
-
-        # eval_metric = metric.compute()
-        # Use accelerator.print to print only on the main process.
-        # accel.print(f"epoch {epoch}:", eval_metric)
-
-    accel.print("Finished training epochs!")
-    accel.print("Saving last checkpoint...") 
-    model.save_pretrained(training_args.output_dir + '/e{epoch}_end',
-                          is_main_process=accel.is_main_process,
-                          save_function=accel.save)
-    accel.print("saved!") 
-
-
-def load_model(ckpt_home, ckpt_name, device=None):
-    model = GPTNeoXForCausalLM.from_pretrained(ckpt_home + ckpt_name)
-    if device:
-        model = model.to(torch.device(device))
-    return model
-
-
-# I've hard-coded the defaults here, but these can be passed as input arguments to the script
-@dataclass
-class DatasetArguments:
-    vocab_file: str = field(default='/home/vyvo/hpcoder/code-lms/polycoder/megatron/tokenizer/gpt_vocab/gpt2-vocab.json')
-    merge_file: str = field(default='/home/vyvo/hpcoder/code-lms/polycoder/megatron/tokenizer/gpt_vocab/gpt2-merges.txt')
-    data_path: str = field(default=f'/export/data/vyvo/OMP_Dataset')
-    save_dataset: bool = field(default=True)
-    tokenizer_type: str = field(default="GPT2BPETokenizer")
-        # Tokenizer to use. Should be one of ["GPT2BPETokenizer", "HFTokenizer", "HFGPT2Tokenizer", "CharLevelTokenizer", "Tokompiler"]
-    """
-    Following arguments leftover from megatron, but still needed to build tokenizer using its functions
-    """
-    rank: int = field(default=0)
-    make_vocab_size_divisible_by: int = field(default=128)
-    model_parallel_size: int = field(default=1)
-
-
-if __name__ == "__main__":
-    parser = HfArgumentParser((DatasetArguments, TrainingArguments))  # This class will allow HF training arguments to be passed as inputs
+    traind, testd = newd
     
-    data_args, training_args = parser.parse_args_into_dataclasses()
+    if args.is_replaced:
+        train_data = []
+        for ids, labels in tqdm(zip(traind['input_ids'], traind['labels'])):
+            train_data.append({'input_ids': ids, 'labels': labels})
 
-    training_args.no_cuda = True
-    training_args.fp16 = True  #True
-    training_args.use_ipex = True
-    #training_args.ddp_backend = 'ccl'
-    training_args.gradient_checkpointing = True
-    training_args.per_device_train_batch_size = 1
-    training_args.per_device_eval_batch_size = 1
-    training_args.gradient_accumulation_steps = 4  #8
-    training_args.save_steps = 1000
-    training_args.save_total_limit = 5
+        test_data = []
+        for ids, labels in tqdm(zip(testd['input_ids'], testd['labels'])):
+            test_data.append({'input_ids': ids, 'labels': labels})
 
-    # TODO: put these in argparser args
-    ckpt_home = '/home/vyvo/hpcoder/checkpoints/hf_conversions/'
-    ckpt_name = 'allc_gpt2tok_2-7B/'
-    model = load_model(ckpt_home, ckpt_name, device='cpu')
+        train_loader = DataLoader(dataset=CustomDataset(train_data), batch_size=args.batch_size, shuffle=True)
+        test_loader = DataLoader(dataset=CustomDataset(test_data), batch_size=args.batch_size)
+    else:
+        world_size = accel.num_processes
+        logger.info(f"Reading world_size as {world_size}...")
+        sampler_batch_sz = args.batch_size
+#        distr_batch_sz = sampler_batch_sz / world_size if world_size > 1 else 1
 
-    print(data_args)
-    print(training_args)
+        collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+        length_sampler = SeqLengthSampler(traind, bucket_boundaries=[2048, 1526, 1024, 0],
+                                      batch_size=sampler_batch_sz)
+        batch_sampler = DistributedBatchSampler(length_sampler, num_replicas=world_size, rank=accel.process_index)
+        train_loader = DataLoader(dataset=traind, sampler=None, batch_sampler=batch_sampler, collate_fn=collator)
+#        test_loader = DataLoader(dataset=testd, batch_size=args.batch_size, collate_fn=collator)
 
-    main(data_args, training_args, model)
+    # MODEL
+    if args.load_model_ckpt:
+        model = GPTNeoXForCausalLM.from_pretrained(args.load_model_ckpt)
+    else:
+        model = AutoModelForCausalLM.from_pretrained("NinedayWang/PolyCoder-2.7B")
+    if args.accel:
+        model = model.to(accel.device)
+        model = accel.prepare(model)
+        logger.info(model)
+        logger.info("Using HuggingFace Accelerator")
+    else:
+        model.to(args.device)
+    model.train()
+
+    # update model embeddings
+    if args.is_replaced:
+        embedding_layer = model.get_input_embeddings()
+        num_embeddings = embedding_layer.weight.shape[0]
+        new_num_embeddings = num_embeddings+len(tokom_extended_tokens)
+        model.resize_token_embeddings(new_num_embeddings)
+        logger.info(f'Embedding layer has changed: {num_embeddings} -> {new_num_embeddings}')
+
+    optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.adam_beta1, args.adam_beta2), eps=args.adam_eps,
+                      weight_decay=args.weight_decay)
+
+    lr_scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                   num_warmup_steps=args.warmup_steps,
+                                                   num_training_steps=(len(train_loader) * args.num_epochs))
+    # import pdb; pdb.set_trace()
+    if args.accel:
+        train_loader, optimizer, lr_scheduler = accel.prepare([train_loader, optimizer, lr_scheduler])
+        if args.save_steps:
+            accel.register_for_checkpointing(lr_scheduler)
+        if args.load_accel_state:
+            logger.info("Loading previous Accelerate state from {args.load_accel_state}...")
+            accel.load_state(args.load_accel_state)
+
+    # TRAIN
+    for epoch in range(args.num_epochs):
+        pbar = tqdm(train_loader, miniters=1, desc=f"Epoch {epoch}")
+        loss_total = 0.0 
+
+        for step, batch in enumerate(pbar):  #train_loader):
+            tensor_batch = {k: v.to(args.device) for k, v in batch.items() if k in ['input_ids', 'labels', 'mask', 'attention_mask']}
+
+            if args.accel:
+                batch.to(accel.device)
+                outputs = model(**tensor_batch)
+                loss = outputs.loss 
+                accel.backward(loss)
+            else:            
+                with autocast():
+                    outputs = model(**tensor_batch)
+                    loss = outputs.loss 
+                    loss.backward()
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+
+            loss_total += loss.detach().clone().item()
+
+            if (step > 0) and (step % 10 == 0):
+                logger.info(f'loss: {loss_total / (step+1)}')
+                pbar.set_postfix({"avg_train_loss": loss_total / (step+1)})
+            if args.accel and args.save_steps:
+                if (step % args.save_steps == 0):
+                    try:
+                        logger.info('Saving HF accelerate training state...')
+                        accel.save_state()
+                    except Exception as e:
+                        print(e)
+                        import pdb; pdb.set_trace()
+
+        # VALIDATION       
+        # val_loss = 0.0
+        # for step_val, batch_val in enumerate(test_loader):
+        #     tensor_batch = {k: v.to(args.device) for k, v in batch_val.items() if k in ['input_ids', 'labels', 'mask', 'attention_mask']}
+
+        #     outputs = model(**tensor_batch)
+        #     loss = outputs.loss 
+        #     val_loss += loss.detach().clone().item()
+        # logger.info(f'val loss:  {val_loss / (step_val+1)}')
+
+        logger.info('Saving model checkpoint...')
+        if args.accel:
+            try:
+                model.save_pretrained(os.path.join(args.save_dir, f'original_poly_bpe/epoch{epoch:02d}'), is_main_process=accel.is_main_process, save_function=accel.save)
+            except Exception as e:
+                print(e)
+                import pdb; pdb.set_trace()
+        else:
+            model.save_pretrained(os.path.join(args.save_dir, 'original_poly_bpe'), from_pt=True) 
+
+#    print('Saving model checkpoint...')
+#    model.save_pretrained(os.path.join(args.save_dir, 'original_poly_bpe'), from_pt=True) 
 
